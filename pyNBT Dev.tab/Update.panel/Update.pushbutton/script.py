@@ -2,8 +2,10 @@
 """
 pyNBT - Update
 
-Downloads the latest pyNBT.extension files from the shared pyNBT GitHub
-repository (public, read-only for everyone except the maintainer) and
+Checks the latest version number published on the shared pyNBT GitHub
+repository against the version installed on this machine. If they match,
+reports "already up to date" and stops - no download, no disruptive
+reload. If they differ, downloads the latest pyNBT.extension files,
 copies them over the local install, then reloads pyRevit so the updated
 tools become active right away - no manual copy/paste needed.
 
@@ -15,11 +17,6 @@ import sys
 import shutil
 import tempfile
 
-import clr
-clr.AddReference('System.IO.Compression.FileSystem')
-from System.IO.Compression import ZipFile
-from System.Net import WebClient
-
 from pyrevit import forms
 
 # --- Make the shared pyNBT lib importable ----------------------------------
@@ -29,25 +26,26 @@ LIB_DIR = os.path.join(EXTENSION_ROOT, "lib")
 if LIB_DIR not in sys.path:
     sys.path.append(LIB_DIR)
 
-from pyNBT.compat import try_reload_pyrevit
+from pyNBT.compat import try_reload_pyrevit, download_file, extract_zip, fetch_text
 
 # --- Constants ---------------------------------------------------------
 TOOL_NAME = "pyNBT - Update"
 REPO_ZIP_URL = "https://github.com/ksnguyentrungkt/pyNBT/archive/refs/heads/main.zip"
+REPO_VERSION_URL = "https://raw.githubusercontent.com/ksnguyentrungkt/pyNBT/main/VERSION"
 REPO_FOLDER_NAME = "pyNBT-main"  # top-level folder name inside the downloaded zip
+LOCAL_VERSION_FILE = os.path.join(EXTENSION_ROOT, "VERSION")
 
 
 # --- Standalone logic functions --------------------------------------------
 
-def download_latest_zip(target_zip_path):
-    """Download the latest snapshot of the pyNBT repo (main branch)."""
-    client = WebClient()
-    client.DownloadFile(REPO_ZIP_URL, target_zip_path)
-
-
-def extract_zip(zip_path, extract_to_dir):
-    """Extract the downloaded zip into a temp folder."""
-    ZipFile.ExtractToDirectory(zip_path, extract_to_dir)
+def get_local_version():
+    """Return the version string currently installed on this machine, or
+    'unknown' if no VERSION file exists yet (e.g. very first install)."""
+    try:
+        with open(LOCAL_VERSION_FILE, 'r') as f:
+            return f.read().strip()
+    except Exception:
+        return "unknown"
 
 
 def copy_tree_overwrite(source_dir, dest_dir):
@@ -70,14 +68,36 @@ def copy_tree_overwrite(source_dir, dest_dir):
 
 
 def run_update():
-    """Full update flow: download -> extract -> copy over -> reload."""
+    """Full update flow: check version -> (skip if same) -> download ->
+    extract -> copy over -> reload."""
+    local_version = get_local_version()
+
+    try:
+        remote_version = fetch_text(REPO_VERSION_URL)
+    except Exception as ex:
+        forms.alert(
+            "Could not check the latest version on GitHub.\n\n"
+            "Check your internet connection and try again.\n\n"
+            "Error: {}".format(str(ex)),
+            title=TOOL_NAME
+        )
+        return
+
+    if local_version == remote_version:
+        forms.alert(
+            "You already have the latest version (v{}).\n"
+            "No update needed.".format(local_version),
+            title=TOOL_NAME
+        )
+        return
+
     temp_dir = tempfile.mkdtemp(prefix="pyNBT_update_")
     zip_path = os.path.join(temp_dir, "pyNBT_latest.zip")
     extract_dir = os.path.join(temp_dir, "extracted")
 
     try:
         try:
-            download_latest_zip(zip_path)
+            download_file(REPO_ZIP_URL, zip_path)
         except Exception as ex:
             forms.alert(
                 "Could not download the latest files from GitHub.\n\n"
@@ -122,16 +142,18 @@ def run_update():
 
     if reload_ok:
         forms.alert(
-            "Update complete - {} file(s) updated.\n\n"
+            "Updated from v{} to v{} - {} file(s) updated.\n\n"
             "pyRevit has been reloaded automatically. "
-            "The pyNBT tab is ready to use.".format(copied_count),
+            "The pyNBT tab is ready to use.".format(
+                local_version, remote_version, copied_count),
             title=TOOL_NAME
         )
     else:
         forms.alert(
-            "Update complete - {} file(s) updated.\n\n"
+            "Updated from v{} to v{} - {} file(s) updated.\n\n"
             "Could not reload pyRevit automatically on this pyRevit "
-            "version.\nPlease click pyRevit tab > Reload to finish.".format(copied_count),
+            "version.\nPlease click pyRevit tab > Reload to finish.".format(
+                local_version, remote_version, copied_count),
             title=TOOL_NAME
         )
 

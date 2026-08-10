@@ -318,3 +318,115 @@ def try_reload_pyrevit():
     except Exception:
         pass
     return False
+
+
+# ---------------------------------------------------------------------------
+# Added for Update tool: HTTP download + zip extraction helpers.
+#
+# Revit 2025+ runs on .NET 8 (CoreCLR) instead of .NET Framework, which
+# changes which BCL assemblies are auto-loaded/importable - System.Net's
+# WebClient and System.IO.Compression's ZipFile do not resolve the same
+# way on every Revit version. Both helpers below try Python's own stdlib
+# first (pure Python, no CLR assembly involved, most portable), then fall
+# back through a few different CLR assembly names.
+# ---------------------------------------------------------------------------
+
+def download_file(url, dest_path):
+    """Download the file at `url` to `dest_path`, trying a few different
+    HTTP mechanisms in turn until one works."""
+    try:
+        import urllib
+        urllib.urlretrieve(url, dest_path)
+        return
+    except Exception:
+        pass
+
+    import clr
+    for assembly_name in ("System.Net.Requests", "System", "System.Net"):
+        try:
+            clr.AddReference(assembly_name)
+            from System.Net import WebClient
+            WebClient().DownloadFile(url, dest_path)
+            return
+        except Exception:
+            continue
+
+    try:
+        clr.AddReference('System.Net.Http')
+        from System.Net.Http import HttpClient
+        from System import Uri
+        from System.IO import File
+        response_bytes = HttpClient().GetByteArrayAsync(Uri(url)).Result
+        File.WriteAllBytes(dest_path, response_bytes)
+        return
+    except Exception as ex:
+        raise Exception(
+            "Could not download {} - tried urllib, WebClient and "
+            "HttpClient, all failed. Last error: {}".format(url, str(ex))
+        )
+
+
+def extract_zip(zip_path, extract_to_dir):
+    """Extract the zip file at `zip_path` into `extract_to_dir`, trying
+    Python's built-in zipfile module first, falling back to .NET's
+    ZipFile if this IronPython build's zlib support is unavailable."""
+    try:
+        import zipfile
+        zf = zipfile.ZipFile(zip_path, 'r')
+        try:
+            zf.extractall(extract_to_dir)
+        finally:
+            zf.close()
+        return
+    except Exception:
+        pass
+
+    import clr
+    for assembly_name in ("System.IO.Compression.FileSystem",
+                           "System.IO.Compression.ZipFile",
+                           "System.IO.Compression"):
+        try:
+            clr.AddReference(assembly_name)
+            from System.IO.Compression import ZipFile
+            ZipFile.ExtractToDirectory(zip_path, extract_to_dir)
+            return
+        except Exception:
+            continue
+
+    raise Exception(
+        "Could not extract {} - tried Python zipfile and .NET ZipFile, "
+        "all failed.".format(zip_path)
+    )
+
+
+def fetch_text(url):
+    """Fetch the text content at `url` and return it as a string (stripped
+    of surrounding whitespace/newlines), trying a few different HTTP
+    mechanisms in turn. Used for small, lightweight checks (e.g. reading a
+    one-line VERSION file) where downloading to a temp file first, like
+    download_file() does, would be wasteful."""
+    try:
+        import urllib2
+        return urllib2.urlopen(url).read().strip()
+    except Exception:
+        pass
+
+    import clr
+    for assembly_name in ("System.Net.Requests", "System", "System.Net"):
+        try:
+            clr.AddReference(assembly_name)
+            from System.Net import WebClient
+            return WebClient().DownloadString(url).strip()
+        except Exception:
+            continue
+
+    try:
+        clr.AddReference('System.Net.Http')
+        from System.Net.Http import HttpClient
+        from System import Uri
+        return HttpClient().GetStringAsync(Uri(url)).Result.strip()
+    except Exception as ex:
+        raise Exception(
+            "Could not fetch {} - tried urllib2, WebClient and HttpClient, "
+            "all failed. Last error: {}".format(url, str(ex))
+        )
