@@ -1,0 +1,5 @@
+title: Generic Twin
+tooltip: >
+  Duplicate the exact geometry of the selected element(s) into a lightweight
+  Generic Model. Host rebar and set Rebar Cover on the light twin instead of
+  the original element to keep the model fast while detailing reinforcement.

@@ -1,0 +1,7 @@
+title: Update
+tooltip: >
+  Download the latest pyNBT tools from the shared pyNBT GitHub repository
+  and reload pyRevit automatically. Click this any time after being told
+  pyNBT has new tools or fixes - no manual file copying needed, and no
+  GitHub login required.
+author: Nguyen Bao Trung (pyNBT)
