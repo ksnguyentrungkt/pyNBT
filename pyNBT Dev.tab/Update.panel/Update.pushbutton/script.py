@@ -114,6 +114,19 @@ def run_update():
         )
         return
 
+    # A new version exists - ask before touching anything. Nothing is
+    # downloaded or changed until the user explicitly confirms here.
+    user_confirmed = forms.alert(
+        "A new version is available.\n\n"
+        "Current version: v{}\n"
+        "New version: v{}\n\n"
+        "Update now?".format(local_version, remote_version),
+        title=TOOL_NAME,
+        yes=True, no=True
+    )
+    if not user_confirmed:
+        return
+
     temp_dir = tempfile.mkdtemp(prefix="pyNBT_update_")
     zip_path = os.path.join(temp_dir, "pyNBT_latest.zip")
     extract_dir = os.path.join(temp_dir, "extracted")
