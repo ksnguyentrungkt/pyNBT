@@ -1,0 +1,10 @@
+title: |-
+  Datum
+  Control
+tooltip: >
+  Batch show/hide the end bubble for Grids and Levels in the active
+  view. Two tabs: Grid (Left/Right/Top/Bottom) and Level (Left/Right).
+  Pick elements first (or leave nothing selected to use everything
+  visible in the active view), tick the ones you want, then use the
+  quick Show/Hide buttons per side.
+author: pyNBT

@@ -1,0 +1,6 @@
+title: 'Join\nControl'
+tooltip: >
+  Batch Disallow Join / Allow Join for Structural Framing, Structural
+  Columns, and Walls. Choose Active View or Current Selection as the scope,
+  then run.
+author: 'Nguyen Bao Trung'
