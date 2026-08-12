@@ -2,12 +2,18 @@
 """
 pyNBT - Update
 
-Checks the latest version number published on the shared pyNBT GitHub
-repository against the version installed on this machine. If they match,
-reports "already up to date" and stops - no download, no disruptive
-reload. If they differ, downloads the latest pyNBT.extension files,
-copies them over the local install, then reloads pyRevit so the updated
-tools become active right away - no manual copy/paste needed.
+Checks the latest PUBLISHED RELEASE on the shared pyNBT GitHub repository
+(not just the latest commit on main) against the version installed on this
+machine. If they match, reports "already up to date" and stops - no
+download, no disruptive reload. If they differ, downloads that release's
+files, copies them over the local install, then reloads pyRevit so the
+updated tools become active right away - no manual copy/paste needed.
+
+Using a GitHub Release (instead of whatever is currently on the main
+branch) as the update source means Trung can push and test work-in-progress
+commits on main at any time without affecting the team - a machine only
+sees a new version to update to once Trung explicitly publishes a Release
+on GitHub for it.
 
 Works the same way for every team member: the repo is public, so no
 GitHub login or token is required on this machine to run Update.
@@ -26,13 +32,19 @@ LIB_DIR = os.path.join(EXTENSION_ROOT, "lib")
 if LIB_DIR not in sys.path:
     sys.path.append(LIB_DIR)
 
-from pyNBT.compat import try_reload_pyrevit, download_file, extract_zip, fetch_text
+from pyNBT.compat import (
+    try_reload_pyrevit, download_file, extract_zip, fetch_json,
+    find_single_subdir,
+)
 
 # --- Constants ---------------------------------------------------------
 TOOL_NAME = "pyNBT - Update"
-REPO_ZIP_URL = "https://github.com/ksnguyentrungkt/pyNBT/archive/refs/heads/main.zip"
-REPO_VERSION_URL = "https://raw.githubusercontent.com/ksnguyentrungkt/pyNBT/main/VERSION"
-REPO_FOLDER_NAME = "pyNBT-main"  # top-level folder name inside the downloaded zip
+REPO_OWNER = "ksnguyentrungkt"
+REPO_NAME = "pyNBT"
+REPO_LATEST_RELEASE_API = "https://api.github.com/repos/{}/{}/releases/latest".format(
+    REPO_OWNER, REPO_NAME)
+REPO_TAG_ZIP_TEMPLATE = "https://github.com/{}/{}/archive/refs/tags/{{tag}}.zip".format(
+    REPO_OWNER, REPO_NAME)
 LOCAL_VERSION_FILE = os.path.join(EXTENSION_ROOT, "VERSION")
 
 
@@ -46,6 +58,14 @@ def get_local_version():
             return f.read().strip()
     except Exception:
         return "unknown"
+
+
+def set_local_version(version_string):
+    """Write `version_string` into the local VERSION file, creating it if
+    needed. Called right after a successful update so the next Update
+    click compares against the release just installed."""
+    with open(LOCAL_VERSION_FILE, 'w') as f:
+        f.write(version_string)
 
 
 def copy_tree_overwrite(source_dir, dest_dir):
@@ -68,16 +88,19 @@ def copy_tree_overwrite(source_dir, dest_dir):
 
 
 def run_update():
-    """Full update flow: check version -> (skip if same) -> download ->
-    extract -> copy over -> reload."""
+    """Full update flow: check latest published release -> (skip if same
+    version already installed) -> download that release -> extract ->
+    copy over -> reload."""
     local_version = get_local_version()
 
     try:
-        remote_version = fetch_text(REPO_VERSION_URL)
+        release_data = fetch_json(REPO_LATEST_RELEASE_API)
+        remote_version = release_data["tag_name"]
     except Exception as ex:
         forms.alert(
-            "Could not check the latest version on GitHub.\n\n"
-            "Check your internet connection and try again.\n\n"
+            "Could not check the latest published version on GitHub.\n\n"
+            "This can also mean no version has been published yet - "
+            "check with Trung.\n\n"
             "Error: {}".format(str(ex)),
             title=TOOL_NAME
         )
@@ -94,15 +117,16 @@ def run_update():
     temp_dir = tempfile.mkdtemp(prefix="pyNBT_update_")
     zip_path = os.path.join(temp_dir, "pyNBT_latest.zip")
     extract_dir = os.path.join(temp_dir, "extracted")
+    download_url = REPO_TAG_ZIP_TEMPLATE.format(tag=remote_version)
 
     try:
         try:
-            download_file(REPO_ZIP_URL, zip_path)
+            download_file(download_url, zip_path)
         except Exception as ex:
             forms.alert(
-                "Could not download the latest files from GitHub.\n\n"
-                "Check your internet connection and try again.\n\n"
-                "Error: {}".format(str(ex)),
+                "Could not download the latest published version from "
+                "GitHub.\n\nCheck your internet connection and try "
+                "again.\n\nError: {}".format(str(ex)),
                 title=TOOL_NAME
             )
             return
@@ -117,8 +141,8 @@ def run_update():
             )
             return
 
-        source_root = os.path.join(extract_dir, REPO_FOLDER_NAME)
-        if not os.path.isdir(source_root):
+        source_root = find_single_subdir(extract_dir)
+        if not source_root:
             forms.alert(
                 "The downloaded update package has an unexpected structure.\n"
                 "No local files were changed.",
@@ -135,6 +159,14 @@ def run_update():
                 title=TOOL_NAME
             )
             return
+
+        # The downloaded release's own VERSION file (if any) may be stale
+        # or missing - always stamp the CONFIRMED release tag we actually
+        # downloaded, so the next Update click compares correctly.
+        try:
+            set_local_version(remote_version)
+        except Exception:
+            pass
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
