@@ -6,8 +6,6 @@ Every pyNBT tool should import ElementId / unit-conversion helpers from
 here instead of re-implementing them inline (see pynbt-tool-builder
 skill, pattern #4).
 """
-import os
-
 from Autodesk.Revit.DB import ElementId, UnitUtils
 
 try:
@@ -432,74 +430,3 @@ def fetch_text(url):
             "Could not fetch {} - tried urllib2, WebClient and HttpClient, "
             "all failed. Last error: {}".format(url, str(ex))
         )
-
-
-# ---------------------------------------------------------------------------
-# Added for Update tool v2: GitHub Releases API support.
-#
-# The GitHub REST API requires a User-Agent header on every request (it
-# rejects requests without one), which plain urllib2.urlopen(url) does not
-# send by default - so this needs an explicit Request object with headers,
-# unlike the simpler fetch_text() above.
-# ---------------------------------------------------------------------------
-
-def fetch_json(url):
-    """Fetch `url` and parse the response body as JSON, returning a plain
-    dict/list. Used to read the GitHub Releases API (which returns JSON,
-    not plain text). Tries the same cascading HTTP mechanisms as
-    fetch_text()/download_file(), each with an explicit User-Agent header
-    since the GitHub API rejects requests that don't send one."""
-    import json
-
-    try:
-        import urllib2
-        request = urllib2.Request(url, headers={"User-Agent": "pyNBT-Update"})
-        raw_text = urllib2.urlopen(request).read()
-        return json.loads(raw_text)
-    except Exception:
-        pass
-
-    import clr
-    for assembly_name in ("System.Net.Requests", "System", "System.Net"):
-        try:
-            clr.AddReference(assembly_name)
-            from System.Net import WebClient
-            client = WebClient()
-            client.Headers.Add("User-Agent", "pyNBT-Update")
-            raw_text = client.DownloadString(url)
-            return json.loads(raw_text)
-        except Exception:
-            continue
-
-    try:
-        clr.AddReference('System.Net.Http')
-        from System.Net.Http import HttpClient
-        from System import Uri
-        http_client = HttpClient()
-        http_client.DefaultRequestHeaders.Add("User-Agent", "pyNBT-Update")
-        raw_text = http_client.GetStringAsync(Uri(url)).Result
-        return json.loads(raw_text)
-    except Exception as ex:
-        raise Exception(
-            "Could not fetch {} - tried urllib2, WebClient and HttpClient, "
-            "all failed. Last error: {}".format(url, str(ex))
-        )
-
-
-def find_single_subdir(path):
-    """Return the full path of the ONE subdirectory inside `path`, or None
-    if there isn't exactly one. A GitHub zip download (branch archive or
-    release zipball) always extracts to a single top-level folder, but its
-    exact name varies (e.g. 'pyNBT-main' for a branch, 'ksnguyentrungkt-
-    pyNBT-<shortsha>' for a release zipball) - this avoids hard-coding that
-    name and breaking if the naming pattern ever changes."""
-    try:
-        entries = [
-            name for name in os.listdir(path)
-            if os.path.isdir(os.path.join(path, name))
-        ]
-    except Exception:
-        return None
-    if len(entries) == 1:
-        return os.path.join(path, entries[0])
-    return None
