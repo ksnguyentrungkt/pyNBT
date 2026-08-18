@@ -1,0 +1,7 @@
+title: 'Renumber'
+tooltip: >
+  Renumber the Mark of selected rebar in reading order (top row first, left
+  to right within each row), based on the project's default XY directions.
+  Two modes: group identical bars under one number, or give every bar its
+  own number. Select rebar in the model first, then run this tool.
+author: 'NBT / pyNBT'

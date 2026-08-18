@@ -1,0 +1,144 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="pyNBT - Select Partition"
+        Height="640" Width="480"
+        MinHeight="420" MinWidth="400"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="CanResizeWithGrip"
+        Background="#F8F9FA"
+        FontFamily="Segoe UI">
+
+    <Window.Resources>
+        <SolidColorBrush x:Key="NavyBrush" Color="#1E293B"/>
+        <SolidColorBrush x:Key="NavyHoverBrush" Color="#2C3E5C"/>
+        <SolidColorBrush x:Key="BorderBrush1" Color="#CBD5E1"/>
+        <SolidColorBrush x:Key="FooterBrush" Color="#F1F5F9"/>
+        <SolidColorBrush x:Key="GrayTextBrush" Color="#4B5563"/>
+        <SolidColorBrush x:Key="MutedBrush" Color="#787878"/>
+
+        <Style x:Key="SecondaryBtn" TargetType="Button">
+            <Setter Property="Padding" Value="12,7"/>
+            <Setter Property="Background" Value="White"/>
+            <Setter Property="Foreground" Value="{StaticResource GrayTextBrush}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush1}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="5">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                               VerticalAlignment="Center"
+                                               Margin="{TemplateBinding Padding}"/>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="PrimaryBtn" TargetType="Button">
+            <Setter Property="Padding" Value="14,10"/>
+            <Setter Property="Background" Value="{StaticResource NavyBrush}"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="bd" Background="{TemplateBinding Background}" CornerRadius="6">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                               VerticalAlignment="Center"
+                                               Margin="{TemplateBinding Padding}"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="{StaticResource NavyHoverBrush}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <Border Grid.Row="0" Background="{StaticResource NavyBrush}" Padding="20,16,20,14">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0">
+                    <TextBlock Text="Select Partition" FontSize="16" FontWeight="Bold" Foreground="White"/>
+                    <TextBlock Text="Statistic Partition values used in the model" FontSize="11" Foreground="#CBD5E1" Margin="0,3,0,0"/>
+                </StackPanel>
+                <Border Grid.Column="1" Background="#332C3E5C" CornerRadius="12" Padding="8,3" VerticalAlignment="Center">
+                    <TextBlock Text="v1.0 - modeless" FontSize="10.5" Foreground="#E6EAF5"/>
+                </Border>
+            </Grid>
+        </Border>
+
+        <!-- Toolbar -->
+        <Border Grid.Row="1" Background="#F8F9FA" BorderBrush="{StaticResource BorderBrush1}" BorderThickness="0,0,0,1" Padding="20,12,20,10">
+            <StackPanel>
+                <Border Background="White" BorderBrush="{StaticResource BorderBrush1}" BorderThickness="1" CornerRadius="6" Padding="9,6">
+                    <TextBox x:Name="txtSearch" BorderThickness="0" Background="Transparent" FontSize="12.5"
+                             TextChanged="OnSearchChanged"/>
+                </Border>
+                <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                    <Button x:Name="btnSelectAll" Content="Select All" Click="OnSelectAll" Style="{StaticResource SecondaryBtn}"/>
+                    <Button x:Name="btnSelectNone" Content="Select None" Click="OnSelectNone" Style="{StaticResource SecondaryBtn}" Margin="8,0,0,0"/>
+                    <Button x:Name="btnRefresh" Content="Refresh" Click="OnRefresh" Style="{StaticResource SecondaryBtn}" Margin="8,0,0,0"/>
+                </StackPanel>
+            </StackPanel>
+        </Border>
+
+        <!-- List header -->
+        <Grid Grid.Row="2" Margin="20,8,20,4">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="34"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="64"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Grid.Column="1" Text="PARTITION" FontSize="10" Foreground="{StaticResource MutedBrush}" FontWeight="SemiBold"/>
+            <TextBlock Grid.Column="2" Text="COUNT" FontSize="10" Foreground="{StaticResource MutedBrush}" FontWeight="SemiBold" HorizontalAlignment="Right"/>
+        </Grid>
+
+        <!-- List -->
+        <Border Grid.Row="3" Background="White" BorderBrush="{StaticResource BorderBrush1}" BorderThickness="0,1,0,0" Margin="0,4,0,0">
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <StackPanel x:Name="panelList"/>
+            </ScrollViewer>
+        </Border>
+
+        <!-- Footer -->
+        <Border Grid.Row="4" Background="{StaticResource FooterBrush}" BorderBrush="{StaticResource BorderBrush1}" BorderThickness="0,1,0,0" Padding="20,12,20,16">
+            <StackPanel>
+                <TextBlock x:Name="txtStatus" Text="Ready - 0 elements selected" FontSize="12" Foreground="{StaticResource GrayTextBrush}" Margin="0,0,0,10"/>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <Button Grid.Column="0" x:Name="btnShowInView" Content="Show in View" Click="OnShowInView" Style="{StaticResource SecondaryBtn}"/>
+                    <Button Grid.Column="1" x:Name="btnSelect" Content="Select in Revit" Click="OnSelectInRevit" Style="{StaticResource PrimaryBtn}" Margin="8,0,0,0"/>
+                </Grid>
+                <TextBlock Text="pyNBT - Select Partition v1.0" FontSize="9.5" Foreground="{StaticResource MutedBrush}" HorizontalAlignment="Center" Margin="0,10,0,0"/>
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>

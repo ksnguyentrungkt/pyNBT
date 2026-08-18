@@ -1,16 +1,18 @@
 # -*- coding: utf-8 -*-
-"""pyNBT - Align Floor Tag
+"""pyNBT - Align Tag
 
-Rotate ONE Floor Tag to run parallel to a reference beam / column / grid
-/ wall / slab, so the tag reads tilted in sync with the structure instead
-of staying at the default horizontal angle.
+Rotate ONE tag (Floor / Structural Framing (beam) / Structural Column /
+Architectural Column / Wall) to run parallel to a reference beam / column
+/ grid / wall / slab, so the tag reads tilted in sync with the structure
+instead of staying at the default horizontal angle.
 
-Single-shot tool: pick 1 Floor Tag, pick 1 reference element, the tag
-rotates immediately, and the tool ends right there - no loop asking for
-the next pair. To align another tag, just click the ribbon button again.
+Single-shot tool: pick 1 tag, pick 1 reference element, the tag rotates
+immediately, and the tool ends right there - no loop asking for the next
+pair. To align another tag, just click the ribbon button again.
 
-Workflow (v1.13):
-    1. Run the tool. Pick ONE Floor Tag.
+Workflow (v2.0):
+    1. Run the tool. Pick ONE tag - Floor, Beam (Structural Framing),
+       Column (Structural or Architectural), or Wall tag.
     2. Click directly on ONE reference beam / column / grid / wall / slab
        (the WHOLE element, not a specific edge) - works the same whether
        it's in the host model or inside a linked RVT (e.g. a Structural
@@ -75,36 +77,58 @@ Design notes:
     angle regardless of what Revit's own rotation properties report, and
     drops the Regenerate() call entirely, which should also make the
     tool noticeably faster.
-    v1.12: Trung's first test of v1.11 hit a new error - "Units are
-    required for field AngleDeg" - Revit refused to Finish() the
-    Extensible Storage schema because a Double field must declare what
-    kind of unit it holds (Revit assumes fields are physical quantities
-    like length by default). Tried fixing it by explicitly marking
-    AngleDeg as SpecTypeId.Number.
-    v1.13: Trung tested v1.12 and hit a DIFFERENT error this time - "The
-    unit unitTypeId is not compatible with the field description" -
-    thrown while actually writing/reading the field, not at schema
-    creation. So SpecTypeId.Number was accepted by Finish() but is not
-    actually a valid unit spec for a Double field either. Rather than
-    keep guessing which Spec Revit will accept, v1.13 avoids the
-    unit/spec system entirely: the stored field is now a plain Int64
-    holding MILLIDEGREES (angle * 1000, rounded) instead of a Double
-    holding degrees. Integer fields have no physical unit and need no
-    Spec at all, so this class of error cannot happen again. Also moved
-    to a fresh schema guid/name, since the old guid may already carry a
-    broken Double-field schema registered during the v1.11/v1.12 test
-    runs. No change to the rotation math itself - only how the angle is
-    physically stored.
+    v1.12/v1.13: the Extensible Storage field itself needed two more
+    fixes before it would actually work. v1.11 stored the angle as a
+    Double field with no unit Spec set, and Revit refused to Finish()
+    the schema at all ("Units are required for field AngleDeg"). v1.12
+    tried declaring that Double field as SpecTypeId.Number (a supposedly
+    unitless numeric spec) - Revit accepted that at Finish() time but
+    then rejected it as an incompatible spec the moment the field was
+    actually written/read ("The unit unitTypeId is not compatible with
+    the field description"). Rather than keep guessing at which Spec
+    Revit will accept for a Double, v1.13 sidesteps the whole unit/spec
+    system: the field is now a plain Int64 storing MILLIDEGREES (angle *
+    1000, rounded) instead of a Double storing degrees. Integer fields
+    carry no physical unit and need no Spec declared at all, so this
+    class of error cannot happen again. (Also switched to a fresh schema
+    guid/name for v1.13, since the old guid may have a broken
+    Double-based schema already registered from the v1.11/v1.12 test
+    runs.)
+    v1.14: v1.13 fixed the skew bug, but Trung reported the rotate step
+    still felt very slow. Added DEBUG_TIMING: prints a per-step timing
+    breakdown to the pyRevit output window (no popup, no behavior
+    change) so a test run tells us exactly which step is slow instead of
+    guessing. Still on while Trung's timing report is pending.
+    v2.0: Trung confirmed the rotation logic itself now works correctly
+    (v1.13 fixed the repeat-align skew for good), then asked to broaden
+    the tool beyond Floor Tags: it should also accept Beam (Structural
+    Framing), Column, and Wall tags. Renamed the tool from "Align Floor
+    Tag" to "Align Tag" to match the wider scope (folder, title, tooltip
+    all updated - this is why it ships as a fresh pushbutton delivery
+    rather than a patch). The rotation math, linked-model handling, and
+    Extensible Storage angle memory needed ZERO changes - none of that
+    code was ever Floor-specific, it already worked generically on any
+    IndependentTag. The only real change is FloorTagFilter -> TagFilter,
+    which now allow-lists 5 tag categories instead of 1: Floor Tags,
+    Structural Framing Tags (beam tags), Structural Column Tags,
+    (Architectural) Column Tags, and Wall Tags. Both column tag
+    categories are included since a given model can carry either or
+    both. The Extensible Storage schema guid/name is unchanged from
+    v1.13 (still internally named "AlignFloorTagAngleV2" - that name is
+    never shown to Trung, so there is no need to touch it, and Extensible
+    Storage schemas cannot be renamed in place once Finish()'d anyway).
 """
 
-__title__ = "Align\nFloor Tag"
-__doc__ = ("Pick a Floor Tag, then click a reference beam / column / "
-           "grid / wall / slab (host model or linked file); the tag "
-           "rotates immediately and the tool finishes right away.")
+__title__ = "Align\nTag"
+__doc__ = ("Pick a Floor / Beam / Column / Wall tag, then click a "
+           "reference beam / column / grid / wall / slab (host model or "
+           "linked file); the tag rotates immediately and the tool "
+           "finishes right away.")
 
 import os
 import sys
 import math
+import time
 
 import System
 import clr
@@ -137,17 +161,36 @@ from pyNBT.compat import eid_int
 doc = revit.doc
 uidoc = revit.uidoc
 
-TOOL_NAME = "Align Floor Tag"
-TOOL_VERSION = "1.13"
+TOOL_NAME = "Align Tag"
+TOOL_VERSION = "2.0"
+
+# v1.14: Trung reported the tool now aligns correctly but the rotate step
+# still feels very slow. All the algorithmic work in this file (one
+# TagOrientation check, one RotateElement call, two tiny Extensible
+# Storage reads/writes) should be near-instant - if it is not, the real
+# cost is almost certainly somewhere Revit itself controls (regenerating
+# the document/view on Transaction.Commit, or - on a workshared central
+# model - a network round trip to "borrow" the tag element before it can
+# be edited). This flag prints a timing breakdown of every step to the
+# pyRevit output window (no popup, does not change behavior) so we can
+# see exactly which step is slow instead of guessing. Safe to leave on;
+# set to False to silence it once the slow step is identified and fixed.
+DEBUG_TIMING = True
+
+
+def _log_timing(label, elapsed_seconds):
+    if DEBUG_TIMING:
+        print("  [pyNBT timing] {}: {:.2f}s".format(label, elapsed_seconds))
 
 # Extensible Storage schema pyNBT uses to remember, ON THE TAG ITSELF, the
 # last absolute angle this tool rotated it to. Fixed GUID - never change
 # once tags in the field may already carry this schema's data.
-# NOTE: this is a NEW guid for v1.13 (the v1.11/v1.12 guid used a Double
-# field that Revit kept rejecting for unit/spec reasons - see the design
-# notes below and in align_tag_to_angle()). Using a fresh guid avoids
-# colliding with any broken schema Revit may have partially registered
-# for the old guid during Trung's earlier test runs.
+# NOTE: this guid/name dates back to v1.13 (the v1.11/v1.12 guid used a
+# Double field that Revit kept rejecting for unit/spec reasons - see the
+# design notes above). The name still says "AlignFloorTagAngleV2" even
+# after the v2.0 rename to "Align Tag" - that name is an internal storage
+# label never shown to Trung, and Extensible Storage schemas cannot be
+# renamed in place once Finish()'d, so it is left as-is on purpose.
 _ANGLE_SCHEMA_GUID = System.Guid("7c3f2a9e-5d1b-4f7a-b8c6-1a9e4d2f6b53")
 _ANGLE_SCHEMA_NAME = "pyNBT_AlignFloorTagAngleV2"
 _ANGLE_FIELD_NAME = "AngleMilliDeg"
@@ -157,14 +200,28 @@ _ANGLE_FIELD_NAME = "AngleMilliDeg"
 # Standalone Revit-logic functions (no UI references - see dqt-patterns.md #2)
 # ---------------------------------------------------------------------------
 
-class FloorTagFilter(ISelectionFilter):
-    """Only allow picking Floor Tags (IndependentTag, category Floor Tags)."""
+# v2.0: tag categories this tool is allowed to pick and rotate. Both column
+# tag categories are included (Structural Column Tags AND Architectural
+# Column Tags) since a project can carry either or both.
+_ALIGNABLE_TAG_CATEGORIES = set([
+    int(BuiltInCategory.OST_FloorTags),
+    int(BuiltInCategory.OST_StructuralFramingTags),
+    int(BuiltInCategory.OST_StructColumnTags),
+    int(BuiltInCategory.OST_ColumnTags),
+    int(BuiltInCategory.OST_WallTags),
+])
+
+
+class TagFilter(ISelectionFilter):
+    """Only allow picking tags this tool can align: Floor, Structural
+    Framing (beam), Structural Column, (Architectural) Column, and Wall
+    tags. Renamed from FloorTagFilter in v2.0 - see the v2.0 design note
+    in the module docstring."""
 
     def AllowElement(self, element):
         try:
             cat = element.Category
-            return (cat is not None
-                    and eid_int(cat.Id) == int(BuiltInCategory.OST_FloorTags))
+            return cat is not None and eid_int(cat.Id) in _ALIGNABLE_TAG_CATEGORIES
         except Exception:
             return False
 
@@ -405,35 +462,58 @@ def align_tag_to_angle(doc, tag, angle_deg):
     class of error cannot happen again. (Also switched to a fresh schema
     guid/name for v1.13, since the old guid may have a broken
     Double-based schema already registered from the v1.11/v1.12 test
-    runs.)
+    runs.) None of this is Floor-specific - it works identically for
+    Beam / Column / Wall tags added in v2.0, since it only ever touches
+    generic IndependentTag members (TagOrientation, TagHeadPosition) plus
+    pyNBT's own Extensible Storage data on the tag element.
     """
+    t_orient = time.time()
     try:
         if tag.TagOrientation != TagOrientation.AnyModelDirection:
             tag.TagOrientation = TagOrientation.AnyModelDirection
     except AttributeError:
         raise Exception("Free tag rotation needs Revit 2022 or later.")
+    _log_timing("Set TagOrientation (only costs time the FIRST time a "
+                "given tag is switched to free rotation)",
+                time.time() - t_orient)
 
+    t_read = time.time()
     previous_deg = _get_stored_angle_deg(tag)
+    _log_timing("Read stored angle (Extensible Storage)",
+                time.time() - t_read)
+
     delta_rad = math.radians(angle_deg - previous_deg)
     # Normalize to the shortest turn so we never spin the long way round.
     delta_rad = (delta_rad + math.pi) % (2 * math.pi) - math.pi
 
     if abs(delta_rad) > 1e-9:
+        t_rotate = time.time()
         head_pos = tag.TagHeadPosition
         axis = Line.CreateBound(head_pos, head_pos + XYZ.BasisZ)
         ElementTransformUtils.RotateElement(doc, tag.Id, axis, delta_rad)
+        _log_timing("RotateElement", time.time() - t_rotate)
 
+    t_write = time.time()
     _store_angle_deg(tag, angle_deg)
+    _log_timing("Write stored angle (Extensible Storage)",
+                time.time() - t_write)
 
 
 def align_one(doc, tag, angle_deg):
     """Rotate tag to angle_deg in its own Transaction. Returns a list of
     error messages (empty on success)."""
     t = Transaction(doc, "pyNBT - {}".format(TOOL_NAME))
+    t_start = time.time()
     t.Start()
+    _log_timing("Transaction.Start", time.time() - t_start)
     try:
         align_tag_to_angle(doc, tag, angle_deg)
+        t_commit = time.time()
         t.Commit()
+        _log_timing("Transaction.Commit (this is where Revit regenerates "
+                    "the document/view - on a workshared central model it "
+                    "can also include a network round trip to borrow the "
+                    "tag element)", time.time() - t_commit)
         return []
     except Exception as ex:
         if t.HasStarted():
@@ -479,27 +559,41 @@ def pick_reference(uidoc, doc):
 # ---------------------------------------------------------------------------
 
 def main():
+    if DEBUG_TIMING:
+        print("--- pyNBT {} v{} timing ---".format(TOOL_NAME, TOOL_VERSION))
+
     try:
         tag_ref = uidoc.Selection.PickObject(
-            ObjectType.Element, FloorTagFilter(), "Pick a Floor Tag to align")
+            ObjectType.Element, TagFilter(),
+            "Pick a Floor / Beam / Column / Wall tag to align")
     except OperationCanceledException:
         return
 
     tag = doc.GetElement(tag_ref)
     if not isinstance(tag, IndependentTag):
-        forms.alert("Please pick a Floor Tag.", title=TOOL_NAME)
+        forms.alert("Please pick a Floor, Beam, Column, or Wall tag.",
+                    title=TOOL_NAME)
         return
 
+    t_pick_ref = time.time()
     ref_pick = pick_reference(uidoc, doc)
+    _log_timing("Pick reference element (includes YOUR OWN mouse time - "
+                "not a useful number to judge tool speed by)",
+                time.time() - t_pick_ref)
     if ref_pick is None:
         return
 
+    t_dir = time.time()
     angle_deg, err = get_reference_direction_deg(doc, ref_pick)
+    _log_timing("Compute reference direction", time.time() - t_dir)
     if angle_deg is None:
         forms.alert(err, title=TOOL_NAME)
         return
 
+    t_align = time.time()
     errors = align_one(doc, tag, angle_deg)
+    _log_timing("TOTAL align_one() (everything after your last click)",
+                time.time() - t_align)
     if errors:
         forms.alert("\n".join(errors), title=TOOL_NAME)
 

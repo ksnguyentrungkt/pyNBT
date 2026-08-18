@@ -1,0 +1,8 @@
+title: Align Tag
+tooltip: >
+  Rotate a Floor / Beam / Column / Wall tag to run parallel to a
+  reference beam / column / grid / wall / slab instead of staying at
+  the default horizontal angle. Pick a tag, then click the reference
+  element (host model or linked file) - the tag rotates immediately
+  and the tool finishes right away. Run it again to align another tag.
+author: Nguyen Bao Trung (pyNBT)

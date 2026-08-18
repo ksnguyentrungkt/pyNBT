@@ -1,0 +1,8 @@
+title: Select Partition
+tooltip: >
+  Statistic every Partition value used on Rebar / RebarInSystem /
+  AreaReinforcement / PathReinforcement / FabricSheet / FabricArea in
+  the whole model, then select the matching elements directly in
+  Revit. Runs as a modeless window - Revit stays usable while it is
+  open.
+author: Nguyen Bao Trung (pyNBT)

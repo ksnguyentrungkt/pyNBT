@@ -1,0 +1,6 @@
+title: 'Crosshead\nShear Link'
+tooltip: >-
+  Generate radial shear-link rebar for a flared (trumpet) crosshead pier
+  head - from a picked concrete solid down into the column rebar cage
+  below. Includes a Preview step before any Rebar is created.
+author: 'Nguyen Bao Trung'
