@@ -1,16 +1,20 @@
 # -*- coding: utf-8 -*-
-"""Renumber Mark of selected rebar in reading order (left-to-right, top-to-bottom),
-based on the model's default (project) coordinate system.
+"""Renumber a chosen parameter (default: 'Rebar Number') of selected rebar in
+reading order (left-to-right, top-to-bottom), based on the model's default
+(project) coordinate system.
 
 pyNBT - Rebar.panel - Renumber Rebar
 """
 __title__ = 'Renumber'
 __author__ = 'NBT / pyNBT'
 __doc__ = (
-    "Renumber the 'Mark' parameter of selected rebar bars in reading order "
-    "(top row first, left to right within each row), based on the project's "
-    "default XY directions. Two modes: group identical bars under one number, "
-    "or give every bar its own number."
+    "Renumber a chosen field (Rebar Number, Schedule Mark, Mark, Comments, "
+    "or Partition) of selected rebar bars in reading order (top row first, "
+    "left to right within each row), based on the project's default XY "
+    "directions. Built and tested for Revit 2026, where 'Rebar Number' is a "
+    "normal, directly-editable parameter (NBT confirmed 2026-08-19). Two "
+    "modes: group identical bars under one number, or give every bar its "
+    "own number."
 )
 
 import clr
@@ -28,8 +32,17 @@ from System.Collections.ObjectModel import ObservableCollection
 # 2026-08-18). XamlReader.Load + FindName() below only needs the three
 # standard WPF assemblies above, so it works everywhere.
 
-from Autodesk.Revit.DB import Transaction, BuiltInParameter
+from Autodesk.Revit.DB import Transaction, StorageType
 from Autodesk.Revit.DB.Structure import Rebar, RebarInSystem
+# NOTE on 'Rebar Number' (v1.7-v1.14 history, resolved v1.15): on some Revit
+# versions this native field is NOT a normal parameter - Revit computes it
+# from its own per-Partition numbering sequences, so a plain param.Set()
+# fails with IsReadOnly (confirmed on Revit 2025, hotfix #9). NBT confirmed
+# (2026-08-19) that on Revit 2026 - the only version this tool targets from
+# v1.15 on - 'Rebar Number' IS a normal, directly-editable parameter, so it
+# is written the same way as Mark/Comments below (apply_marks_to_model()).
+# is_rebar_number_directly_writable() still checks this per-run as a safety
+# net rather than assuming it - see the note above that function.
 
 from pyrevit import revit, forms, script
 
@@ -99,6 +112,32 @@ def get_bbox_center(elem):
         return None
 
 
+def get_bar_diameter_ft(document, elem):
+    """Bar diameter in feet (Revit internal units), or None if unavailable.
+
+    RebarBarType exposes the diameter under different property names
+    depending on Revit version/how the type was set up (nominal size vs the
+    diameter actually used to build the 3D geometry) - try each in order
+    and use whichever one is present. (v1.2 only tried 'BarDiameter', which
+    isn't a real RebarBarType property - that's why the Diameter column in
+    the preview always showed '-'.)
+    """
+    try:
+        bar_type = document.GetElement(elem.GetTypeId())
+    except Exception:
+        return None
+    if bar_type is None:
+        return None
+    for prop_name in ('BarModelDiameter', 'BarNominalDiameter', 'BarDiameter'):
+        val = getattr(bar_type, prop_name, None)
+        if val is not None:
+            try:
+                return float(val)
+            except Exception:
+                continue
+    return None
+
+
 def get_bar_signature(document, elem):
     """Best-effort 'identical bar' signature: (diameter, shape_id, length).
 
@@ -106,13 +145,9 @@ def get_bar_signature(document, elem):
     since not every rebar-like element exposes every property the same way
     (RebarInSystem has no discrete shape family, for example).
     """
-    diameter = None
-    try:
-        bar_type = document.GetElement(elem.GetTypeId())
-        if bar_type is not None:
-            diameter = round(bar_type.BarDiameter, 5)
-    except Exception:
-        diameter = None
+    diameter = get_bar_diameter_ft(document, elem)
+    if diameter is not None:
+        diameter = round(diameter, 5)
 
     shape_id = None
     try:
@@ -315,17 +350,21 @@ def compute_reading_order(items, tol_ft, layout_mode='auto'):
 
 
 def assign_marks(document, ordered_elems, mode, prefix, start_number):
-    """mode: 'group' or 'unique'. Returns dict {ElementId: mark_string} plus
-    a parallel list of rows for the preview table, in the same order."""
+    """mode: 'group' or 'unique'. Returns dict {ElementId: (number_int, mark_str)}
+    plus a parallel list of (elem, mark_str) rows for the preview table, in
+    the same order. Both the plain number and the prefixed text are kept so
+    apply_marks_to_model() can pick whichever matches the target parameter's
+    actual StorageType (Integer field like 'Rebar Number' vs String field
+    like 'Mark')."""
     marks = {}
     preview_rows = []
 
     if mode == 'unique':
         n = start_number
         for elem in ordered_elems:
-            mark_value = '{}{}'.format(prefix, n)
-            marks[elem.Id] = mark_value
-            preview_rows.append((elem, mark_value))
+            mark_str = '{}{}'.format(prefix, n)
+            marks[elem.Id] = (n, mark_str)
+            preview_rows.append((elem, mark_str))
             n += 1
     else:
         group_number = {}
@@ -333,40 +372,142 @@ def assign_marks(document, ordered_elems, mode, prefix, start_number):
         for elem in ordered_elems:
             sig = get_bar_signature(document, elem)
             if sig not in group_number:
-                group_number[sig] = '{}{}'.format(prefix, next_n[0])
+                group_number[sig] = next_n[0]
                 next_n[0] += 1
-            mark_value = group_number[sig]
-            marks[elem.Id] = mark_value
-            preview_rows.append((elem, mark_value))
+            n = group_number[sig]
+            mark_str = '{}{}'.format(prefix, n)
+            marks[elem.Id] = (n, mark_str)
+            preview_rows.append((elem, mark_str))
 
     return marks, preview_rows
 
 
-def apply_marks_to_model(document, marks):
-    """Writes the Mark (BuiltInParameter.ALL_MODEL_MARK) of every element in
-    `marks` inside a single Transaction. Returns (success_count, failed_count)."""
+def find_param_by_name(elem, name):
+    """Look up a parameter on `elem` by its displayed name (e.g. 'Rebar
+    Number', 'Mark', 'Schedule Mark') without guessing a BuiltInParameter
+    enum - Revit's native parameter names are far more reliable than the
+    enum mapping, which has already been wrong twice in this tool's history
+    (Mark vs Rebar Number). Tries the fast built-in lookup first, then falls
+    back to a manual scan of every instance parameter in case LookupParameter
+    misses it for some element types."""
+    try:
+        param = elem.LookupParameter(name)
+        if param is not None:
+            return param
+    except Exception:
+        pass
+    try:
+        for p in elem.Parameters:
+            try:
+                if p.Definition is not None and p.Definition.Name == name:
+                    return p
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
+
+
+def apply_marks_to_model(document, marks, target_param_name):
+    """Writes `target_param_name` (looked up by display name, e.g. 'Rebar
+    Number') on every element in `marks` inside a single Transaction.
+
+    marks: {ElementId: (number_int, mark_str)}. The parameter's actual
+    StorageType decides what gets written: Integer/Double fields (like the
+    native 'Rebar Number') get the plain number, String fields (like 'Mark'
+    or 'Comments') get the prefix+number text. This is what makes the tool
+    work correctly against both kinds of field instead of only 'Mark'.
+
+    Returns (success_count, failed_count, fail_reasons, error_samples).
+    fail_reasons is a dict of counts by cause: not_found / read_only /
+    unsupported_type / other. error_samples is a short list (up to 5) of
+    literal Revit exception text for whatever failed under 'other' - always
+    surfaced to the user instead of a bare count (same reasoning as the
+    NumberingSchema write path below: a count alone was not enough to
+    diagnose past failures, see hotfix #13).
+    """
     t = Transaction(document, 'pyNBT - Renumber Rebar')
     t.Start()
     success = 0
     failed = 0
+    fail_reasons = {'not_found': 0, 'read_only': 0, 'unsupported_type': 0, 'other': 0}
+    error_samples = []
     try:
-        for eid, mark_value in marks.items():
+        for eid, value in marks.items():
+            number_val, mark_str = value
             elem = document.GetElement(eid)
             if elem is None:
                 failed += 1
+                fail_reasons['not_found'] += 1
                 continue
-            param = elem.get_Parameter(BuiltInParameter.ALL_MODEL_MARK)
-            if param is None or param.IsReadOnly:
+            param = find_param_by_name(elem, target_param_name)
+            if param is None:
                 failed += 1
+                fail_reasons['not_found'] += 1
                 continue
-            param.Set(mark_value)
-            success += 1
+            if param.IsReadOnly:
+                failed += 1
+                fail_reasons['read_only'] += 1
+                continue
+            try:
+                storage = param.StorageType
+                if storage == StorageType.String:
+                    param.Set(mark_str)
+                elif storage == StorageType.Integer:
+                    param.Set(int(number_val))
+                elif storage == StorageType.Double:
+                    param.Set(float(number_val))
+                else:
+                    failed += 1
+                    fail_reasons['unsupported_type'] += 1
+                    continue
+                success += 1
+            except Exception as ex:
+                failed += 1
+                fail_reasons['other'] += 1
+                if len(error_samples) < 5:
+                    error_samples.append('element {}: {}'.format(eid_int(eid), str(ex)))
+                continue
         t.Commit()
     except Exception:
         if t.HasStarted():
             t.RollBack()
         raise
-    return success, failed
+    return success, failed, fail_reasons, error_samples
+
+
+# ---------------------------------------------------------------------------
+# 'Rebar Number' support check.
+#
+# v1.7-v1.13 of this tool wrote 'Rebar Number' through Revit's own
+# partition-based NumberingSchema/ChangeNumber API, because on Revit 2025
+# that field is computed/locked (a plain Parameter.Set() fails with
+# IsReadOnly - hotfix #9). NBT confirmed (2026-08-19) that every test so far
+# was actually run on Revit 2026, where 'Rebar Number' is a normal, directly-
+# editable parameter - and NBT has decided (2026-08-19) to only use this
+# tool on Revit 2026 going forward. v1.15 removes the NumberingSchema
+# machinery entirely to keep the tool simple and maintainable: it now only
+# ever writes 'Rebar Number' the same way as Mark/Comments, via
+# apply_marks_to_model() above. is_rebar_number_directly_writable() below is
+# kept as a safety check so the tool fails with a clear message (instead of
+# a confusing Revit error) if it's ever pointed at a document/Revit version
+# where the field turns out to be locked again. The full partition-based
+# implementation (Conflict Handling / evict / first-time numbering /
+# Regenerate()) still exists in the v1.13 files already delivered to NBT, in
+# case a future Revit downgrade or another project ever needs it back.
+# ---------------------------------------------------------------------------
+def is_rebar_number_directly_writable(elem):
+    """True if 'Rebar Number' behaves as a normal, directly-editable
+    parameter on this element - confirmed by NBT (2026-08-19): on Revit
+    2026, typing straight into the 'Rebar Number' field in the Properties
+    panel works exactly like 'Mark'/'Comments', no read-only lock."""
+    param = find_param_by_name(elem, 'Rebar Number')
+    if param is None:
+        return False
+    try:
+        return not param.IsReadOnly
+    except Exception:
+        return False
 
 
 class PreviewRow(object):
@@ -400,6 +541,7 @@ class RenumberRebarController(object):
         self.window = load_xaml_window(XAML_FILE)
 
         # named controls declared in ui.xaml (x:Name="...")
+        self.CmbTargetParam = self.window.FindName('CmbTargetParam')
         self.RbGroup = self.window.FindName('RbGroup')
         self.RbUnique = self.window.FindName('RbUnique')
         self.TxtPrefix = self.window.FindName('TxtPrefix')
@@ -439,6 +581,9 @@ class RenumberRebarController(object):
 
     # -- helpers ------------------------------------------------------
     def _read_inputs(self):
+        target_item = self.CmbTargetParam.SelectedItem
+        target_param_name = target_item.Tag if target_item is not None else 'Rebar Number'
+
         prefix = self.TxtPrefix.Text.strip() if self.TxtPrefix.Text else ''
 
         try:
@@ -460,13 +605,13 @@ class RenumberRebarController(object):
         layout_item = self.CmbLayout.SelectedItem
         layout_mode = layout_item.Tag if layout_item is not None else 'auto'
 
-        return prefix, start_number, tol_mm, mode, layout_mode
+        return prefix, start_number, tol_mm, mode, layout_mode, target_param_name
 
     def _compute(self):
         inputs = self._read_inputs()
         if inputs is None:
             return None
-        prefix, start_number, tol_mm, mode, layout_mode = inputs
+        prefix, start_number, tol_mm, mode, layout_mode, target_param_name = inputs
         tol_ft = tol_mm * MM_TO_FT
 
         items = []
@@ -480,26 +625,34 @@ class RenumberRebarController(object):
 
         ordered, detected_layout = compute_reading_order(items, tol_ft, layout_mode)
         marks, preview_rows = assign_marks(doc, ordered, mode, prefix, start_number)
-        return marks, preview_rows, skipped_no_bbox, detected_layout
+
+        # confirm 'Rebar Number' is directly writable on this document (true
+        # on Revit 2026, the only version this tool targets from v1.15 on -
+        # NBT confirmed 2026-08-19) - checked on a real selected bar, never
+        # assumed, so Apply can refuse clearly instead of failing confusingly
+        # if this tool is ever pointed at an older Revit document/version
+        # where the field is locked again (see is_rebar_number_directly_writable()).
+        rebar_direct_writable = False
+        if target_param_name == 'Rebar Number' and preview_rows:
+            rebar_direct_writable = is_rebar_number_directly_writable(preview_rows[0][0])
+
+        return (marks, preview_rows, skipped_no_bbox, detected_layout,
+                target_param_name, rebar_direct_writable)
 
     # -- event handlers -------------------------------------------------
     def refresh_preview(self, sender, args):
         result = self._compute()
         if result is None:
             return
-        marks, preview_rows, skipped_no_bbox, detected_layout = result
+        (marks, preview_rows, skipped_no_bbox, detected_layout,
+         target_param_name, rebar_direct_writable) = result
         self._last_marks = marks
 
         display_rows = ObservableCollection[object]()
         for i, (elem, mark_value) in enumerate(preview_rows, start=1):
-            diameter_mm = None
+            diameter_ft = get_bar_diameter_ft(doc, elem)
+            diameter_mm = diameter_ft * 304.8 if diameter_ft is not None else None
             length_mm = None
-            try:
-                bar_type = doc.GetElement(elem.GetTypeId())
-                if bar_type is not None:
-                    diameter_mm = bar_type.BarDiameter * 304.8
-            except Exception:
-                pass
             try:
                 length_mm = elem.TotalLength * 304.8
             except Exception:
@@ -509,38 +662,100 @@ class RenumberRebarController(object):
         self.ListPreview.ItemsSource = display_rows
 
         layout_label = LAYOUT_LABELS.get(detected_layout, detected_layout or '-')
-        status = 'Detected layout: {} | {} bar(s) will be numbered ({} distinct mark(s)).'.format(
-            layout_label, len(preview_rows), len(set(marks.values()))
+        mark_strs = [row[1] for row in preview_rows]
+        first_mark = mark_strs[0] if mark_strs else '-'
+        status = 'Target: {} | Detected layout: {} | First value: {} | {} bar(s) will be numbered ({} distinct value(s)).'.format(
+            target_param_name, layout_label, first_mark, len(preview_rows), len(set(mark_strs))
         )
         if self.skipped:
             status += ' {} non-rebar element(s) skipped.'.format(self.skipped)
         if skipped_no_bbox:
             status += ' {} bar(s) skipped (no readable position).'.format(skipped_no_bbox)
+
+        # warn up front if the chosen parameter is numeric and a prefix is
+        # set - text can't be written into an Integer/Double field, so the
+        # prefix would silently be dropped at Apply time
+        prefix_text = self.TxtPrefix.Text.strip() if self.TxtPrefix.Text else ''
+        sample_param = find_param_by_name(self.bars[0], target_param_name) if self.bars else None
+        if prefix_text and sample_param is not None and sample_param.StorageType != StorageType.String:
+            status += ' Note: "{}" is a numeric field - the prefix "{}" will be ignored, only the number is written.'.format(
+                target_param_name, prefix_text
+            )
+        # warn up front if the chosen parameter is read-only on this element -
+        # EXCEPT "Rebar Number", which gets its own dedicated warning below
+        # (via rebar_direct_writable) since a locked "Rebar Number" is a
+        # known, explained case, not a generic read-only field
+        if sample_param is not None and sample_param.IsReadOnly and target_param_name != 'Rebar Number':
+            status += ' Warning: "{}" is read-only on this element - Apply will fail. Choose a different Target Parameter.'.format(
+                target_param_name
+            )
+        if target_param_name == 'Rebar Number':
+            if rebar_direct_writable:
+                status += ' Note: "Rebar Number" is written directly (like Mark/Comments).'
+            else:
+                status += (
+                    ' Warning: this Revit document has "Rebar Number" locked (older Revit '
+                    'version behavior) - this tool build only supports writing it directly. '
+                    'Choose a different Target Parameter, or contact NBT/pyNBT for an update.'
+                )
         self.TxtStatus.Text = status
 
     def apply_marks(self, sender, args):
         result = self._compute()
         if result is None:
             return
-        marks, preview_rows, skipped_no_bbox, detected_layout = result
+        (marks, preview_rows, skipped_no_bbox, detected_layout,
+         target_param_name, rebar_direct_writable) = result
 
         if not marks:
             forms.alert("No rebar to number.", title='pyNBT - Renumber Rebar')
             return
 
+        is_rebar_number = (target_param_name == 'Rebar Number')
+
+        if is_rebar_number and not rebar_direct_writable:
+            # This tool build (v1.15+) only supports writing 'Rebar Number'
+            # directly (Revit 2026 behavior, confirmed by NBT 2026-08-19) -
+            # the older partition-based NumberingSchema workaround was
+            # removed to keep the tool simple, since NBT only uses this tool
+            # on Revit 2026. Refuse clearly instead of attempting something
+            # that would just fail with a confusing Revit error.
+            forms.alert(
+                "\"Rebar Number\" is locked on this document (older Revit version "
+                "behavior) - this tool build only supports writing it directly "
+                "(Revit 2026). Choose a different Target Parameter, or ask "
+                "NBT/pyNBT for an update that supports this Revit version again.",
+                title='pyNBT - Renumber Rebar'
+            )
+            return
+
         try:
-            success, failed = apply_marks_to_model(doc, marks)
+            success, failed, fail_reasons, error_samples = apply_marks_to_model(doc, marks, target_param_name)
         except Exception as ex:
-            forms.alert("Error writing Mark to the model:\n{}".format(str(ex)), title='pyNBT - Renumber Rebar')
+            forms.alert(
+                "Error writing '{}' to the model:\n{}".format(target_param_name, str(ex)),
+                title='pyNBT - Renumber Rebar'
+            )
             logger.error('Renumber Rebar failed: %s', ex)
             return
 
-        msg = 'Successfully numbered {} bar(s).'.format(success)
+        msg = 'Successfully wrote "{}" for {} bar(s).'.format(target_param_name, success)
         if failed:
-            msg += '\n{} bar(s) failed to write Mark (parameter locked or invalid).'.format(failed)
+            reasons = []
+            if fail_reasons.get('not_found'):
+                reasons.append('{} bar(s) have no "{}" parameter'.format(fail_reasons['not_found'], target_param_name))
+            if fail_reasons.get('read_only'):
+                reasons.append('{} bar(s) have "{}" locked/read-only'.format(fail_reasons['read_only'], target_param_name))
+            if fail_reasons.get('unsupported_type'):
+                reasons.append('{} bar(s) have an unsupported parameter type'.format(fail_reasons['unsupported_type']))
+            if fail_reasons.get('other'):
+                reasons.append('{} bar(s) failed for another reason'.format(fail_reasons['other']))
+            msg += '\n{} bar(s) failed:\n- {}'.format(failed, '\n- '.join(reasons))
+            if error_samples:
+                msg += '\n\nRevit error detail(s):\n- {}'.format('\n- '.join(error_samples))
+                logger.error('Renumber Rebar (%s) errors: %s', target_param_name, '; '.join(error_samples))
         forms.alert(msg, title='pyNBT - Renumber Rebar')
-        self.TxtStatus.Text = msg
-        self.refresh_preview(None, None)
+        self.window.Close()
 
     def close_window(self, sender, args):
         self.window.Close()
