@@ -1,0 +1,8 @@
+title: Rebar Bend Standard
+tooltip: >
+  Auto-configure the bend diameter (StandardBendDiameter, Hook Bend Diameter,
+  Stirrup/Tie Bend Diameter, Maximum Bend Radius) on every Rebar Bar Type in
+  this project, based on a selected design standard. Run once at the start
+  of a new project instead of entering these values by hand for each bar
+  size.
+author: Nguyen Bao Trung

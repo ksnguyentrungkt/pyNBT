@@ -1,0 +1,7 @@
+title: 'Crank\nRebar'
+tooltip: >-
+  Cut a straight rebar at a picked point and crank the continuing segment
+  up/down by exactly 1x the bar diameter, with a diagonal (NxD) transition
+  and a manual lap-splice length. Choose which screen side (Left/Right) gets
+  the crank. Save/reuse Lap+Crank+Direction+Side presets per project.
+author: pyNBT

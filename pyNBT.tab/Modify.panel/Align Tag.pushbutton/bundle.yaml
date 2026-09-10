@@ -1,8 +1,11 @@
 title: Align Tag
 tooltip: >
-  Rotate a Floor / Beam / Column / Wall tag to run parallel to a
-  reference line YOU define. Pick a tag, then click 2 points anywhere
-  in the view (snaps work like any Revit pick, host model or linked
-  file) - the tag rotates immediately to match that line's direction
-  and the tool finishes right away. Run it again to align another tag.
+  Rotate one or many Floor / Beam / Column / Wall / Foundation tags
+  and/or Text Notes to run parallel to a reference line YOU define.
+  Pre-select elements first (or pick them when prompted - click one by
+  one, or drag a box to grab many at once, tags and Text Notes can be
+  mixed together freely), then click 2 points anywhere in the view
+  (snaps work like any Revit pick, host model or linked file) - every
+  element rotates immediately to match that line's direction and the
+  tool finishes right away. Run it again to align another batch.
 author: Nguyen Bao Trung (pyNBT)

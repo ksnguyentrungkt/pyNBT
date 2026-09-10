@@ -1,0 +1,7 @@
+title: 'Parameter\nTransfer'
+tooltip: >
+  Convert an existing Project Parameter into a real Shared Parameter (with
+  a GUID) so it can be used in a Tag Label. Every value already keyed in
+  on model elements is copied over and verified before the old parameter
+  is removed - a CSV backup is saved automatically first.
+author: 'Nguyen Bao Trung'

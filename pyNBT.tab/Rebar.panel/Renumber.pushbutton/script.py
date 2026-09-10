@@ -495,6 +495,13 @@ def apply_marks_to_model(document, marks, target_param_name):
 # implementation (Conflict Handling / evict / first-time numbering /
 # Regenerate()) still exists in the v1.13 files already delivered to NBT, in
 # case a future Revit downgrade or another project ever needs it back.
+#
+# v1.22 (2026-08-19): NBT went back to this simpler v1.15 lineage as the
+# permanent baseline - he will manually reset Rebar Number (Structure >
+# Reinforcement Numbers) before running this tool when needed, instead of
+# the tool trying to auto-detect/resolve conflicts itself. The more complex
+# schema.ChangeNumber()-based write path explored in v1.16-v1.21 is
+# deprecated; do not resurrect it here without NBT asking again.
 # ---------------------------------------------------------------------------
 def is_rebar_number_directly_writable(elem):
     """True if 'Rebar Number' behaves as a normal, directly-editable
@@ -510,13 +517,88 @@ def is_rebar_number_directly_writable(elem):
         return False
 
 
+def get_current_rebar_number_display(elem):
+    """Current 'Rebar Number' on `elem`, as text - always this specific
+    field regardless of which Target Parameter is selected (NBT asked for
+    this 2026-08-19, so the Preview's 'Old Rebar Number' column stays a
+    fixed reference point even when renumbering Mark/Comments/etc.)."""
+    param = find_param_by_name(elem, 'Rebar Number')
+    if param is None:
+        return '-'
+    try:
+        if param.StorageType == StorageType.Integer:
+            val = param.AsInteger()
+            return str(val) if val else '-'
+        elif param.StorageType == StorageType.String:
+            val = param.AsString()
+            return val if val else '-'
+        elif param.StorageType == StorageType.Double:
+            val = param.AsValueString()
+            return val if val else '-'
+    except Exception:
+        pass
+    return '-'
+
+
+def check_number_continuity(document, elem_ids, target_param_name):
+    """After a successful Apply, read back the ACTUAL current value of
+    `target_param_name` for each element in `elem_ids` and check whether the
+    resulting set of distinct values forms a contiguous run (no gaps) - NBT
+    asked for this (2026-08-19) as a post-Apply sanity check: the alert
+    already reports a pass/fail COUNT, but that doesn't say which specific
+    numbers ended up missing from the model (e.g. if one bar silently failed
+    to write, the sequence 1,2,3,4,5 becomes 1,2,3,5 with 4 missing).
+
+    Only meaningful for an Integer-storage field (like the native 'Rebar
+    Number') - skipped entirely for String fields (Mark/Comments with a
+    prefix), where "contiguous" isn't a well-defined idea.
+
+    Returns (has_gap, missing_numbers, sorted_actual_values).
+    """
+    sample_elem = None
+    for eid in elem_ids:
+        e = document.GetElement(eid)
+        if e is not None:
+            sample_elem = e
+            break
+    if sample_elem is None:
+        return False, [], []
+
+    sample_param = find_param_by_name(sample_elem, target_param_name)
+    if sample_param is None or sample_param.StorageType != StorageType.Integer:
+        return False, [], []
+
+    values = set()
+    for eid in elem_ids:
+        elem = document.GetElement(eid)
+        if elem is None:
+            continue
+        param = find_param_by_name(elem, target_param_name)
+        if param is None:
+            continue
+        try:
+            val = param.AsInteger()
+        except Exception:
+            continue
+        if val and val > 0:
+            values.add(val)
+
+    if len(values) < 2:
+        return False, [], sorted(values)
+
+    lo, hi = min(values), max(values)
+    missing = [n for n in range(lo, hi + 1) if n not in values]
+    return (len(missing) > 0), missing, sorted(values)
+
+
 class PreviewRow(object):
     """Simple data-bindable row for the preview ListView."""
-    def __init__(self, index, elem, diameter_mm, length_mm, new_mark):
+    def __init__(self, index, elem, diameter_mm, length_mm, old_rebar_number, new_mark):
         self.No = index
         self.ElementId = elem.Id.IntegerValue if hasattr(elem.Id, 'IntegerValue') else eid_int(elem.Id)
         self.Diameter = '{:.0f} mm'.format(diameter_mm) if diameter_mm is not None else '-'
         self.Length = '{:.0f} mm'.format(length_mm) if length_mm is not None else '-'
+        self.OldRebarNumber = old_rebar_number
         self.NewMark = new_mark
 
 
@@ -657,7 +739,8 @@ class RenumberRebarController(object):
                 length_mm = elem.TotalLength * 304.8
             except Exception:
                 pass
-            display_rows.Add(PreviewRow(i, elem, diameter_mm, length_mm, mark_value))
+            old_rebar_number = get_current_rebar_number_display(elem)
+            display_rows.Add(PreviewRow(i, elem, diameter_mm, length_mm, old_rebar_number, mark_value))
 
         self.ListPreview.ItemsSource = display_rows
 
@@ -754,6 +837,25 @@ class RenumberRebarController(object):
             if error_samples:
                 msg += '\n\nRevit error detail(s):\n- {}'.format('\n- '.join(error_samples))
                 logger.error('Renumber Rebar (%s) errors: %s', target_param_name, '; '.join(error_samples))
+
+        # v1.22: post-Apply continuity check - NBT wants to know right away
+        # if the numbers just written have a gap (e.g. one bar silently
+        # failed to write, or a group's target number got skipped), instead
+        # of only seeing a pass/fail count.
+        if success:
+            has_gap, missing, actual_values = check_number_continuity(doc, list(marks.keys()), target_param_name)
+            if has_gap:
+                shown_missing = missing[:20]
+                more = len(missing) - len(shown_missing)
+                msg += (
+                    '\n\nWarning: "{}" is NOT contiguous for the bar(s) just numbered - '
+                    '{} value(s) between {} and {} are missing: {}{}'
+                ).format(
+                    target_param_name, len(missing), actual_values[0], actual_values[-1],
+                    ', '.join(str(n) for n in shown_missing),
+                    ' (+{} more)'.format(more) if more > 0 else ''
+                )
+
         forms.alert(msg, title='pyNBT - Renumber Rebar')
         self.window.Close()
 

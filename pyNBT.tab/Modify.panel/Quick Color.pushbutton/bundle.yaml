@@ -1,0 +1,6 @@
+title: 'Quick Color'
+tooltip: >
+  Apply a fast graphic override color to selected elements in the active
+  view (Surface Pattern + Cut Pattern, solid fill). Uses the current
+  selection if there is one, otherwise prompts you to pick elements.
+  View-specific only - does not change the element's Material.

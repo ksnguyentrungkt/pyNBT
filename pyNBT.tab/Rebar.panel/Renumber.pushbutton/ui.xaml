@@ -81,7 +81,7 @@
                     <TextBlock Text="Auto-detects Ring / Line / Grid, writes the chosen parameter in reading order" FontSize="11" Foreground="#CBD5E1" Margin="0,2,0,0"/>
                 </StackPanel>
                 <Border Grid.Column="1" Background="#334155" CornerRadius="4" Padding="8,4" VerticalAlignment="Center">
-                    <TextBlock Text="v1.15" FontSize="11" Foreground="#FFFFFF"/>
+                    <TextBlock Text="v1.22" FontSize="11" Foreground="#FFFFFF"/>
                 </Border>
             </Grid>
         </Border>
@@ -167,6 +167,7 @@
                                 <GridViewColumn Header="Element Id" DisplayMemberBinding="{Binding ElementId}" Width="90"/>
                                 <GridViewColumn Header="Diameter" DisplayMemberBinding="{Binding Diameter}" Width="80"/>
                                 <GridViewColumn Header="Length" DisplayMemberBinding="{Binding Length}" Width="80"/>
+                                <GridViewColumn Header="Old Rebar Number" DisplayMemberBinding="{Binding OldRebarNumber}" Width="120"/>
                                 <GridViewColumn Header="New Value" DisplayMemberBinding="{Binding NewMark}" Width="100"/>
                             </GridView>
                         </ListView.View>

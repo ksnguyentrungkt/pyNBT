@@ -1,0 +1,10 @@
+title: Rebar Re-host
+tooltip: >
+  Change the host of selected rebar bars to a new Twin (DirectShape) object,
+  without deleting and recreating the rebar - keeps ElementId, Mark, and
+  existing schedule/tag links intact.
+
+
+  Select the rebar bars together with exactly one Twin (Generic Model)
+  object in a single selection, then run. The tool tells the rebar apart
+  from the Twin host automatically.
