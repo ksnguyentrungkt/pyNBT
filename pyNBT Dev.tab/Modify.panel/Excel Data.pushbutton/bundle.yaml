@@ -1,0 +1,7 @@
+title: |-
+  Excel
+  Data
+tooltip: >-
+  Export a Schedule to Excel and re-import the edited file to update the
+  right elements' parameters in the model. Merges Export + Import in one window.
+author: NBT

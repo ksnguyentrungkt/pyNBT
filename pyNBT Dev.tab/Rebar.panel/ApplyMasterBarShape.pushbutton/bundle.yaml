@@ -1,0 +1,9 @@
+title: |-
+  Apply Master
+  Bar Shape
+tooltip: >-
+  Companion to Circular Rebar Array (Phase 3). Reads the hand-corrected
+  shape of ONE rebar bar (edited via Edit Sketch to match the real
+  crosshead surface) and re-creates the other bars in the array by
+  scaling that same shape to each bar's own true radius at the top.
+author: NBT

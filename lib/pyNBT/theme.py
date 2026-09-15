@@ -29,6 +29,14 @@ CLR_SUCCESS     = _c(56, 142, 60)     # Green - success rows
 CLR_SKIP        = _c(158, 158, 158)   # Gray - skipped rows
 CLR_ERROR       = _c(198, 40, 40)     # Red - failed rows
 
+# (added when building Excel Data, 2026-09) light background tints for
+# status rows inside dense DataGrid tables, where a full CLR_SUCCESS /
+# CLR_ERROR fill (meant for compact one-line legend chips) would be too
+# heavy across many columns/rows - text stays CLR_TEXT on these, no need
+# for text_color_for_bg().
+CLR_SUCCESS_BG  = _c(234, 246, 235)   # Light green - "will update" row tint
+CLR_ERROR_BG    = _c(251, 234, 234)   # Light red - error row tint
+
 
 def brush(color):
     return SolidColorBrush(color)

@@ -1,0 +1,10 @@
+title: |-
+  Select
+  By Family
+tooltip: >
+  Filter the CURRENT SELECTION by Family: pre-select elements in Revit
+  first, then run this tool to group them by Family name with counts,
+  tick the Family(ies) you want, and re-select only those elements.
+  Expand a Family row to reveal its Types with their own counts, and
+  tick individual Types for a more precise re-selection.
+author: NBT

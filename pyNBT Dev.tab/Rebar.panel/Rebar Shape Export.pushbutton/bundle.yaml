@@ -1,0 +1,10 @@
+title: |-
+  Rebar
+  Shape
+tooltip: |-
+  Export the real bent shape of selected Rebar element(s) into a new
+  Drafting View, with segment lengths and key info (Partition, Mark,
+  Diameter, Quantity, Length) labeled as text.
+
+  Select one or more Rebar elements in the model, then click.
+author: NBT
