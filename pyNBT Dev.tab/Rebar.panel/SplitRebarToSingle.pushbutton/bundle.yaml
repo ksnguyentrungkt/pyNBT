@@ -1,0 +1,13 @@
+title: |-
+  Split Rebar
+  to Single
+tooltip: >
+  Split every selected Rebar Set (multiple bars) or Free Form Rebar into
+  plain single Rebar elements (Layout = Single), keeping each bar's exact
+  original shape, bend radii, and hook curl.
+
+
+  Select the Rebar Set(s) / Free Form Rebar(s) to split, then run. Bars
+  already Single are left untouched. Destructive (delete + rebuild) -
+  asks for confirmation first.
+author: NBT

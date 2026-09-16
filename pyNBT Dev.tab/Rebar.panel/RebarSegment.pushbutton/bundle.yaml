@@ -1,0 +1,8 @@
+title: 'Rebar\nSegment'
+tooltip: >-
+  Drape top-layer rebar across a warped/twisted host face (e.g. a ramp
+  transition slab). Pick a top face + 4 corner points (A, b, c, d) -- bars
+  follow the face's real curved surface instead of a flat plane through
+  those 4 points, spaced by real surface distance. Auto-assigns a fresh
+  Partition value to the batch. V1: straight bars only, no auto hook.
+author: pyNBT

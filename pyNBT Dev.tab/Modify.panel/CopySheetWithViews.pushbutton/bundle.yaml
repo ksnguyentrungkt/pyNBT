@@ -1,0 +1,10 @@
+title: |-
+  Copy Sheet
+  + Views
+tooltip: >
+  Duplicate one or more Sheets together with every View placed on them in
+  one click - normal views are duplicated (With Detailing or plain,
+  your choice) and renamed "- COPY", while Legends and Schedules are
+  always reused on the new Sheet instead of being duplicated. You type
+  the New Sheet Number for each sheet (Revit requires it to be unique).
+author: Nguyen Bao Trung (pyNBT)

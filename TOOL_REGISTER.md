@@ -3,7 +3,8 @@
 Every tool in `pyNBT.extension`. Check here before starting a new one — if
 something close already exists, extend it instead of duplicating.
 Last synced with the real `E:\101.Revit Add-Ins\pyNBT.extension` folder on
-2026-09-14.
+2026-09-16.
+
 
 ## pyNBT.tab (production — live in Revit)
 
@@ -43,6 +44,16 @@ Last synced with the real `E:\101.Revit Add-Ins\pyNBT.extension` folder on
 | Tool | Folder | Status | Purpose |
 |---|---|---|---|
 | Rebar Bend Standard | `RebarBendStandardSetup.pushbutton` | draft (v3.1 — TCVN 5574:2018 verified + Singapore BS8666/EN1992-1-1, awaiting NBT's live test) | Auto-configure bend diameter (Standard/Hook/Tie/Max Radius) on every RebarBarType per selected national standard |
+
+### Rebar.panel
+
+| Tool | Folder | Status | Purpose |
+|---|---|---|---|
+| Rebar Segment | `RebarSegment.pushbutton` | draft (v1.0.4 — corner picks snap to the face's real boundary vertices via `Face.GetEdgesAsCurveLoops()`, and each locked corner now drops a colored crosshair marker for visual confirmation; awaiting NBT's live retest) | Drape top-layer rebar across a warped/twisted host face (e.g. a ramp transition slab or a curved wall): pick a top face + 4 corner points (A, b, c, d), bars follow the face's real curved surface (not a flat plane), spaced by real surface distance, with corner cover from both the top and adjacent side face on the first/last bar. V1 = straight bars only, no auto hook. See project doc "rebar-segment-warped-face-tool.md" |
+| ApplyMasterBarShape | `ApplyMasterBarShape.pushbutton` | **undocumented in this register — predates the 2026-09-14 sync, purpose not re-confirmed** | (need NBT/Claude to confirm and backfill) |
+| CircularRebarArray | `CircularRebarArray.pushbutton` | **undocumented in this register — predates the 2026-09-14 sync, purpose not re-confirmed** | (need NBT/Claude to confirm and backfill) |
+| Rebar Shape Export | `Rebar Shape Export.pushbutton` | **undocumented in this register — predates the 2026-09-14 sync; actually at v1.5.0+ per project doc "rebar-shape-export.md", purpose not re-confirmed here** | Export the true bent shape of selected Rebar into a Drafting View with real Dimensions (Linear/Radial/Angular) + optional per-bar PNG export named by Rebar Number |
+| Split Rebar to Single | `SplitRebarToSingle.pushbutton` | draft (v1.0.0 — 2026-09-16, awaiting NBT's live test) | Split every selected Rebar Set (multiple bars) or true Free Form Rebar into plain single Rebar elements (Layout = Single), keeping each bar's exact original shape/bend radii (hooks kept as baked-in geometry, not a re-assigned Hook Type parameter — see script docstring). A genuinely 3D/warped Free Form shape is skipped with an error instead of being forced flat. |
 
 ### Modify.panel
 
