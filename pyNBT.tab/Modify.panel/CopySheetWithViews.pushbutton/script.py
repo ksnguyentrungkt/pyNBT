@@ -44,6 +44,18 @@ TOOL_NAME = 'Copy Sheet + Views'
 import os
 import sys
 
+# The WPF assemblies are NOT loaded automatically just by importing
+# pyrevit.forms - they must be referenced explicitly, before ANY
+# System.Windows.* import (including pyNBT.theme, which itself imports
+# System.Windows.Media). Skipping this fails at import time with
+# "ImportException: No module named Windows" (same pattern already used
+# by Excel Data.pushbutton/script.py - mirrored here for consistency).
+import clr
+clr.AddReference('PresentationCore')
+clr.AddReference('PresentationFramework')
+clr.AddReference('WindowsBase')
+clr.AddReference('System.Xaml')
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))   # ...\CopySheetWithViews.pushbutton
 PANEL_DIR = os.path.dirname(SCRIPT_DIR)                    # ...\Modify.panel
 TAB_DIR = os.path.dirname(PANEL_DIR)                        # ...\pyNBT Dev.tab
@@ -55,12 +67,6 @@ if LIB_DIR not in sys.path:
 
 from pyrevit import forms, revit, script
 
-# pyrevit.forms references the WPF assemblies (PresentationFramework,
-# PresentationCore, WindowsBase) as a side effect of being imported - that
-# reference must exist before ANYTHING imports System.Windows.* below,
-# including pyNBT.theme (which itself imports System.Windows.Media).
-# Importing pyNBT.theme before pyrevit.forms fails with
-# "ImportException: No module named Windows".
 from pyNBT.compat import eid_int
 from pyNBT.theme import CLR_MUTED, CLR_TEXT, brush
 

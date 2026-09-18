@@ -63,7 +63,7 @@ from System.Xml import XmlDocument, XmlNamespaceManager
 from System.Windows import (
     Window, WindowStartupLocation, Thickness, HorizontalAlignment,
     VerticalAlignment, FontWeights, TextWrapping, GridLength, GridUnitType,
-    Visibility,
+    Visibility, ResizeMode,
 )
 from System.Windows.Controls import (
     Grid, RowDefinition, ColumnDefinition,
@@ -72,6 +72,7 @@ from System.Windows.Controls import (
     DataGridSelectionMode, ComboBox, ComboBoxItem,
 )
 from System.Windows.Data import Binding
+from System.Windows.Input import Key
 
 from Autodesk.Revit.DB import (
     Transaction, XYZ, BuiltInParameter, BasePoint,
@@ -116,7 +117,7 @@ uidoc = revit.uidoc
 logger = script.get_logger()
 
 TOOL_NAME = "Add Points"
-TOOL_VERSION = "v3.2"
+TOOL_VERSION = "v3.4"
 # Trung's hand-built adaptive marker family, shipped next to script.py.
 # Its geometry (a small triangular block) and the single Adaptive Point
 # sitting exactly on its sharp corner / (0,0,0) origin are entirely
@@ -569,6 +570,18 @@ def create_points(document, rows, origin_mode=ORIGIN_MODE_CUSTOM, custom_origin=
         and each row's raw X,Y,Z is treated as an absolute SURVEY coordinate,
         converted with `survey_to_internal_point` (Trung's verified Excel
         formula). Available for both Family and Project.
+
+        X,Y use the fixed national survey grid (T,U,V never drift), but Z
+        (Elevation) is measured from a Reduced Level benchmark that the
+        survey/civil team CAN and DID re-level mid-project (seen 2026-07:
+        a project's Survey Point Elevation was corrected by 1.82 m after
+        Custom mode had already been in use, silently making every new
+        point 1.82 m short since Custom never re-reads anything from
+        Revit). So for Project documents Custom mode now auto-adds
+        whatever Survey Point's live Elevation currently is on top of the
+        typed Z - if that benchmark gets corrected again later, the next
+        run just picks it up with no manual offset to remember. Family
+        documents have no Survey Point element, so this offset is 0 there.
       - ORIGIN_MODE_INTERNAL: raw X,Y,Z used directly as an internal
         coordinate, no offset/rotation. Available for both Family and
         Project.
@@ -593,6 +606,19 @@ def create_points(document, rows, origin_mode=ORIGIN_MODE_CUSTOM, custom_origin=
     if is_custom:
         easting_m, northing_m, angle_deg = custom_origin
 
+    # Elevation (Z) rides on a Reduced Level benchmark that can be
+    # re-corrected mid-project even though X,Y (Easting/Northing) never
+    # move - see the note above. Read whatever Survey Point's live
+    # Elevation currently is, once, and add it to every row's Z below.
+    survey_elev_offset_m = 0.0
+    if is_custom and not is_family:
+        try:
+            survey_pt = BasePoint.GetSurveyPoint(document)
+            if survey_pt is not None:
+                survey_elev_offset_m = internal_to_m(survey_pt.Position.Z)
+        except Exception:
+            survey_elev_offset_m = 0.0
+
     symbol = None
     if not is_family:
         symbol = get_or_create_pyramid_symbol(document)
@@ -608,7 +634,8 @@ def create_points(document, rows, origin_mode=ORIGIN_MODE_CUSTOM, custom_origin=
                 z_m = parse_coordinate(row.get("z"))
 
                 if is_custom:
-                    pt = survey_to_internal_point(x_m, y_m, z_m, easting_m, northing_m, angle_deg)
+                    z_m_adjusted = z_m + survey_elev_offset_m
+                    pt = survey_to_internal_point(x_m, y_m, z_m_adjusted, easting_m, northing_m, angle_deg)
                 elif is_internal:
                     pt = XYZ(m_to_internal(x_m), m_to_internal(y_m), m_to_internal(z_m))
                 else:
@@ -636,6 +663,7 @@ def create_points(document, rows, origin_mode=ORIGIN_MODE_CUSTOM, custom_origin=
         debug_info = {
             "origin_m": (custom_origin[0], custom_origin[1], 0.0),
             "angle_deg": custom_origin[2],
+            "survey_elev_offset_m": survey_elev_offset_m,
         }
     elif is_internal:
         debug_info = {"origin_m": (0.0, 0.0, 0.0), "angle_deg": 0.0}
@@ -692,6 +720,88 @@ def _make_small_box(text, width=90):
     box.VerticalAlignment = VerticalAlignment.Center
     box.Margin = Thickness(0, 0, 12, 0)
     return box
+
+
+class _TextInputDialog(Window):
+    """Small "type a name" prompt used by on_save_preset (v3.3).
+
+    Replaces pyrevit.forms.ask_for_string, which was reported by Trung as
+    not letting him type/save a preset name at all. Root cause: ask_for_string
+    opens its own independent top-level window with no Owner set, so while
+    the main Add Points window is showing modally (ShowDialog), that prompt
+    can end up opening BEHIND it with no way to bring it forward - looking
+    exactly like "nothing happens when I click Save preset...". Setting
+    `Owner = <the Add Points window>` here forces WPF to always keep this
+    dialog on top of it and centered over it, which a window with no owner
+    cannot guarantee."""
+
+    def __init__(self, owner, title, prompt, default_text=""):
+        Window.__init__(self)
+        self.Owner = owner
+        self.Title = title
+        self.Width = 380
+        self.Height = 170
+        self.ResizeMode = ResizeMode.NoResize
+        self.ShowInTaskbar = False
+        self.WindowStartupLocation = WindowStartupLocation.CenterOwner
+        self.Background = brush(CLR_BG)
+        self.result_text = None
+
+        panel = StackPanel()
+        panel.Margin = Thickness(16)
+
+        lbl = TextBlock()
+        lbl.Text = prompt
+        lbl.Foreground = brush(CLR_TEXT)
+        lbl.TextWrapping = TextWrapping.Wrap
+        lbl.Margin = Thickness(0, 0, 0, 8)
+        panel.Children.Add(lbl)
+
+        self.input_box = TextBox()
+        self.input_box.Text = default_text
+        self.input_box.Height = 28
+        self.input_box.Padding = Thickness(4, 3, 4, 3)
+        self.input_box.Margin = Thickness(0, 0, 0, 16)
+        self.input_box.PreviewKeyDown += self._on_key_down
+        panel.Children.Add(self.input_box)
+
+        btn_row = StackPanel()
+        btn_row.Orientation = Orientation.Horizontal
+        btn_row.HorizontalAlignment = HorizontalAlignment.Right
+
+        btn_cancel = _make_btn("Cancel", CLR_CARD, CLR_TEXT, width=90, height=30)
+        btn_cancel.BorderBrush = brush(CLR_BORDER)
+        btn_cancel.BorderThickness = Thickness(1)
+        btn_cancel.Click += self._on_cancel
+        btn_row.Children.Add(btn_cancel)
+
+        btn_ok = _make_btn("OK", CLR_APPLY, CLR_APPLY_TEXT, width=90, height=30)
+        btn_ok.Click += self._on_ok
+        btn_row.Children.Add(btn_ok)
+
+        panel.Children.Add(btn_row)
+        self.Content = panel
+        self.Loaded += self._on_loaded
+
+    def _on_loaded(self, sender, args):
+        self.input_box.Focus()
+        self.input_box.SelectAll()
+
+    def _on_key_down(self, sender, args):
+        if args.Key == Key.Enter:
+            self._on_ok(sender, args)
+        elif args.Key == Key.Escape:
+            self._on_cancel(sender, args)
+
+    def _on_ok(self, sender, args):
+        self.result_text = self.input_box.Text
+        self.DialogResult = True
+        self.Close()
+
+    def _on_cancel(self, sender, args):
+        self.result_text = None
+        self.DialogResult = False
+        self.Close()
 
 
 class AddPointsWindow(Window):
@@ -1149,11 +1259,11 @@ class AddPointsWindow(Window):
             )
             return
 
-        name = forms.ask_for_string(
-            default=self.target_doc.Title,
-            prompt="Preset name (e.g. project name):",
-            title=TOOL_NAME,
+        dialog = _TextInputDialog(
+            self, TOOL_NAME, "Preset name (e.g. project name):", self.target_doc.Title,
         )
+        dialog.ShowDialog()
+        name = dialog.result_text
         if not name:
             return
         name = name.strip()
@@ -1284,10 +1394,11 @@ class AddPointsWindow(Window):
         if debug_info.get("origin_m") is not None:
             ox, oy, oz = debug_info["origin_m"]
             if origin_mode == ORIGIN_MODE_CUSTOM:
+                elev_offset = debug_info.get("survey_elev_offset_m", 0.0)
                 origin_note = (
                     " | {} used Easting(T)={:.4f} Northing(U)={:.4f} m, "
-                    "angle(V)={:.4f} deg".format(
-                        origin_mode, ox, oy, debug_info["angle_deg"]
+                    "angle(V)={:.4f} deg, +Survey Point elevation {:.4f} m".format(
+                        origin_mode, ox, oy, debug_info["angle_deg"], elev_offset
                     )
                 )
             else:

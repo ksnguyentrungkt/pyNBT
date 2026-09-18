@@ -19,30 +19,27 @@ How to use:
      straight onto that corner's real vertex -- no precise clicking
      needed. A colored crosshair marker is dropped on each locked corner
      (A=red, b=green, c=blue, d=orange) so you can see exactly which point
-     was used; the markers are cleaned up once the rebar is created (or
-     when you click Close).
-  3. Click "Pick 4 Side Faces" -- pick, in order: the side face at the
-     A-b end, the side face at the c-d end, the side face along rail
-     A->c, then the side face along rail b->d. The 2 END faces only push
-     in the FIRST/LAST bar (their 2 endpoints touch that end of the
-     region). The 2 RAIL faces push in EVERY bar, because every bar's 2
-     endpoints ride along those exact 2 edges (A->c and b->d).
-  4. Choose a LAYOUT MODE:
+     was used; the markers stay on screen (through Create Rebar too) until
+     you restart Step 1 or click Close, so you can keep checking A/b/c/d
+     while troubleshooting a run's result.
+  3. Choose a LAYOUT MODE:
        - "Rail-to-rail" -- every bar spans rail A->c to rail b->d, evenly
-         spaced along the rail (the original behaviour). Step 2 picks 4
-         side faces (A-b end, c-d end, rail A->c, rail b->d).
-       - "Parallel (clip at boundary)" -- Step 2 only picks 2 side faces
-         (the bar's own 2 ends). Draw a Model Line or Detail Line first
-         (Revit's own Line tool, in a plan view) along the direction you
-         want the bars to run, then click "Pick Direction Line" (Step 3)
-         and pick it. Every bar runs PARALLEL to that line, spaced at a
-         true perpendicular distance, clipped wherever it runs outside
-         the top face. "Edge Distance" sets back the first/last row from
-         the A-b / c-d ends (a plain number, replacing the old end-face
-         picks). A bar clipped shorter than "Min Bar Length" is skipped.
-  5. Click "Create Rebar". Cover is measured to the bar's OUTER surface --
+         spaced along the rail (the original behaviour). Nothing more to
+         pick -- go straight to "Create Rebar".
+       - "Parallel (clip at boundary)" -- draw a Model Line or Detail Line
+         first (Revit's own Line tool, in a plan view) along the direction
+         you want the bars to run, then click "Pick Direction Line"
+         (Step 2, shown only in this mode) and pick it. Every bar runs
+         PARALLEL to that line, spaced at a true perpendicular distance,
+         clipped wherever it runs outside the top face. "Edge Distance"
+         sets back the first/last row from the A-b / c-d ends. A bar
+         clipped shorter than "Min Bar Length" is skipped.
+  4. Click "Create Rebar". Cover is measured to the bar's OUTER surface --
      the tool automatically adds the selected Bar Type's own radius on
-     top of the Cover value you enter.
+     top of the Cover value you enter, and is pushed in from BOTH the top
+     face and whichever of the quad's 4 edges (A-b, b-d, d-c, c-A) each
+     bar endpoint actually sits on/near -- computed straight from the 4
+     picked corner points, no side face pick needed any more (v1.2.0).
 
 V1 scope (locked with NBT, see project doc
 "rebar-segment-warped-face-tool.md"): every bar is a single straight
@@ -56,7 +53,7 @@ one shared plane for the whole area), so a hook added by hand later bends
 in the correct local direction. A fresh Partition value (not colliding
 with anything already in the model) is auto-assigned to the whole batch.
 
-pyNBT Dev.tab / Rebar.panel / RebarSegment.pushbutton
+pyNBT Rebar.tab / Rebar.panel / RebarSegment.pushbutton
 """
 
 __title__ = "Rebar\nSegment"
@@ -79,7 +76,7 @@ import sys
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))    # ...\RebarSegment.pushbutton
 PANEL_DIR = os.path.dirname(SCRIPT_DIR)                     # ...\Rebar.panel
-TAB_DIR = os.path.dirname(PANEL_DIR)                        # ...\pyNBT Dev.tab
+TAB_DIR = os.path.dirname(PANEL_DIR)                        # ...\pyNBT Rebar.tab
 EXTENSION_DIR = os.path.dirname(TAB_DIR)                    # ...\pyNBT.extension
 LIB_DIR = os.path.join(EXTENSION_DIR, "lib")
 
@@ -122,7 +119,30 @@ doc = __revit__.ActiveUIDocument.Document
 uidoc = __revit__.ActiveUIDocument
 
 TOOL_TITLE = "Rebar Segment"
-TOOL_VERSION = "v1.1.1"
+TOOL_VERSION = "v1.2.0"
+
+# v1.2.0 -- NBT's FIRST real test of the v1.0.7 rail-cover fix, on a real
+# warped ramp/pier structure, came back "0 Errors, 120 Warnings: Rebar is
+# placed completely outside of its host" for EVERY bar created. Root
+# cause: cover was pushed "inward" by picking a SIDE FACE and projecting
+# the point onto it (Face.Project) to read that face's local normal --
+# fragile on a twisted/warped host, where the picked face may not extend
+# cleanly under every point being offset, and a failed projection's old
+# nudge-toward-an-anchor fallback could land on a wildly wrong part of
+# that face (or effectively nowhere useful) instead of failing safely.
+# NBT's fix, applied to BOTH layout modes: drop side-face picking
+# ENTIRELY -- Step 2 (side faces) no longer exists in either mode. Cover
+# "inward" is now computed purely from the 4 corner points (A, b, c, d)
+# already picked in Step 1 plus the TOP face's own local normal (the one
+# face read that HAS been reliable since v1.0.6) -- see
+# logic.edge_inward_offset. Rail-to-rail mode now needs nothing beyond
+# Step 1 before Create Rebar; Parallel mode needs Step 1 + the direction
+# line pick (renumbered from "Step 3" to "Step 2", since there's no longer
+# a Step 2 side-face pick in between). Also: the corner-crosshair markers
+# are no longer auto-deleted right after a successful Create Rebar (only
+# on Close or restarting Step 1) -- NBT was troubleshooting a bad result
+# and the markers had already vanished by the time he looked, which he
+# read (reasonably) as a separate bug.
 
 # v1.1.1 -- NBT tried "parallel" Layout Mode and asked for 2
 # simplifications:
@@ -382,10 +402,6 @@ class RebarSegmentWindow(Window):
         self.pt_b = None
         self.pt_c = None
         self.pt_d = None
-        self.side_face_ab = None
-        self.side_face_cd = None
-        self.side_face_ac = None
-        self.side_face_bd = None
         self.dir_p1 = None
         self.dir_p2 = None
         self._corner_markers = []
@@ -448,25 +464,25 @@ class RebarSegmentWindow(Window):
             "highlights as you hover near it -- click ROUGHLY near the "
             "corner, the tool snaps to that corner's real vertex for you, "
             "and drops a colored crosshair there so you can see it locked "
-            "(A=red, b=green, c=blue, d=orange).\n"
-            "3) 'Pick 4 Side Faces', in order: side face at the A-b end, "
-            "side face at the c-d end, side face along rail A->c, side "
-            "face along rail b->d. The 2 end faces only affect the "
-            "first/last bar; the 2 rail faces affect EVERY bar, since "
-            "every bar's ends ride along those 2 edges.\n"
-            "4) Choose LAYOUT MODE: 'Rail-to-rail' (original -- every bar "
-            "spans rail A->c to rail b->d, needs 4 side faces) or "
-            "'Parallel (clip at boundary)' -- needs only 2 side faces "
-            "(the bar's own 2 ends) + Step 3: draw a Model/Detail Line "
-            "first for direction, then pick it. Every bar runs parallel "
-            "to that line at a TRUE perpendicular spacing and gets "
-            "clipped at the top face's boundary; 'Edge Distance' sets "
-            "back the first/last row from the A-b / c-d ends (a plain "
-            "number, no extra pick needed); a bar clipped shorter than "
-            "Min Bar Length is skipped.\n"
-            "5) 'Create Rebar' -- Cover is measured to the bar's OUTER "
-            "surface; the tool adds the Bar Type's own radius on top of "
-            "the Cover value automatically."
+            "(A=red, b=green, c=blue, d=orange) -- the crosshairs stay on "
+            "screen through Create Rebar, until you restart Step 1 or "
+            "click Close.\n"
+            "3) Choose LAYOUT MODE: 'Rail-to-rail' (original -- every bar "
+            "spans rail A->c to rail b->d) needs nothing more, go "
+            "straight to Create Rebar. 'Parallel (clip at boundary)' "
+            "needs Step 2: draw a Model/Detail Line first for direction, "
+            "then pick it. Every bar runs parallel to that line at a "
+            "TRUE perpendicular spacing and gets clipped at the top "
+            "face's boundary; 'Edge Distance' sets back the first/last "
+            "row from the A-b / c-d ends; a bar clipped shorter than Min "
+            "Bar Length is skipped.\n"
+            "4) 'Create Rebar' -- Cover is measured to the bar's OUTER "
+            "surface (the tool adds the Bar Type's own radius on top of "
+            "the Cover value automatically) and pushed in from BOTH the "
+            "top face and whichever of the quad's 4 edges (A-b, b-d, "
+            "d-c, c-A) each bar endpoint sits on/near -- computed "
+            "straight from the 4 picked corner points, no side face pick "
+            "needed."
         )
         help_icon.Margin = Thickness(8, 3, 0, 0)
         left.Children.Add(help_icon)
@@ -559,24 +575,12 @@ class RebarSegmentWindow(Window):
         btn_pick1.Click += self.on_pick1_click
         panel.Children.Add(btn_pick1)
 
-        panel.Children.Add(self._separator_labeled("STEP 2 - SIDE FACES (COVER)"))
-        self.tb_pick2_status = _text(
-            "Not picked yet.", size=12, color=CLR_MUTED,
-        )
-        self.tb_pick2_status.Margin = Thickness(0, 6, 0, 0)
-        panel.Children.Add(self.tb_pick2_status)
-
-        # v1.1.1 -- label/prompt count depends on Layout Mode (4 faces for
-        # "rail", 2 for "parallel") -- kept in sync by on_layout_mode_changed.
-        self.btn_pick2 = _btn("Pick 4 Side Faces (A-b, c-d, A-c, b-d)", CLR_ACCENT, CLR_HEADER_TEXT)
-        self.btn_pick2.Click += self.on_pick2_click
-        panel.Children.Add(self.btn_pick2)
-
-        # v1.1.0 -- Step 3 only matters in "parallel" Layout Mode; hidden
+        # v1.2.0 -- Step 2 only matters in "parallel" Layout Mode; hidden
         # (Visibility.Collapsed) whenever "rail" mode is selected, see
-        # on_layout_mode_changed.
+        # on_layout_mode_changed. (There is no side-face pick step any
+        # more in either mode -- see logic.edge_inward_offset.)
         self.step3_panel = StackPanel()
-        self.step3_panel.Children.Add(self._separator_labeled("STEP 3 - DIRECTION LINE (PARALLEL MODE ONLY)"))
+        self.step3_panel.Children.Add(self._separator_labeled("STEP 2 - DIRECTION LINE (PARALLEL MODE ONLY)"))
         step3_hint = _text(
             "Draw a Model Line or Detail Line first (Revit's own Line "
             "tool, in a plan view) along the direction you want the bars "
@@ -721,38 +725,22 @@ class RebarSegmentWindow(Window):
     def on_pick1_click(self, sender, args):
         run_on_revit(self.do_pick_geometry)
 
-    def on_pick2_click(self, sender, args):
-        run_on_revit(self.do_pick_side_faces)
-
     def on_pick3_click(self, sender, args):
         run_on_revit(self.do_pick_direction)
 
     def on_layout_mode_changed(self, sender, args):
-        """Step 3 (Pick Direction Line) only matters in "parallel" Layout
+        """Step 2 (Pick Direction Line) only matters in "parallel" Layout
         Mode; show/hide it so "rail" mode (unchanged default behaviour)
-        doesn't present an irrelevant extra step. v1.1.1 -- Step 2 also
-        needs a different button label + face count per mode (4 for
-        "rail", 2 for "parallel"); any side faces already picked are
-        cleared on a mode switch so a stale pick from the OTHER mode's
-        step count can never be used by mistake."""
+        doesn't present an irrelevant extra step. v1.2.0 -- there is no
+        longer a side-face pick step in either mode (see
+        logic.edge_inward_offset), so nothing else needs resetting here
+        any more."""
         item = self.cmb_layout_mode.SelectedItem
         mode = item.Tag if item is not None else "rail"
         self.step3_panel.Visibility = (
             System.Windows.Visibility.Visible if mode == "parallel"
             else System.Windows.Visibility.Collapsed
         )
-
-        self.side_face_ab = None
-        self.side_face_cd = None
-        self.side_face_ac = None
-        self.side_face_bd = None
-        self.tb_pick2_status.Text = "Not picked yet."
-        self.tb_pick2_status.Foreground = _brush(CLR_MUTED)
-
-        if mode == "parallel":
-            self.btn_pick2.Content = "Pick 2 Side Faces (bar ends)"
-        else:
-            self.btn_pick2.Content = "Pick 4 Side Faces (A-b, c-d, A-c, b-d)"
 
     def on_create_click(self, sender, args):
         run_on_revit(self.do_create)
@@ -897,95 +885,17 @@ class RebarSegmentWindow(Window):
         self.pt_a, self.pt_b, self.pt_c, self.pt_d = points
         self.tb_pick1_status.Text = "OK - top face + A, b, c, d picked."
         self.tb_pick1_status.Foreground = _brush(CLR_SUCCESS)
-        self._set_status(
-            "Top face + 4 points picked (see the colored crosshairs: A=red, "
-            "b=green, c=blue, d=orange). Now pick the 2 side faces (Step 2).",
-            CLR_MUTED,
-        )
-
-    def do_pick_side_faces(self):
-        try:
-            self._do_pick_side_faces_inner()
-        finally:
-            self._bring_to_front()
-
-    def _do_pick_side_faces_inner(self):
-        if self.top_face is None:
-            self._set_status(
-                "Pick the top face + 4 points first (Step 1).", CLR_ERROR
-            )
-            return
-
-        # v1.0.7 -- same restriction used for the 4 corner edge picks in
-        # Step 1: keeps Revit from pre-highlighting/accepting a face that
-        # belongs to some other nearby element.
-        same_el_filter = _SameElementFilter(self.top_host.Id)
-
         mode_item = self.cmb_layout_mode.SelectedItem
         layout_mode = mode_item.Tag if mode_item is not None else "rail"
-
         if layout_mode == "parallel":
-            # v1.1.1 -- Parallel mode only needs the 2 faces at each bar's
-            # own 2 ends (stored in the SAME side_face_ac/side_face_bd
-            # attributes "rail" mode uses for its 2 rail faces -- same
-            # role: cover pushed into EVERY bar's own 2 endpoints). The 2
-            # END faces (A-b, c-d) are no longer picked in this mode --
-            # "Edge Distance" replaces them, see build_rebar_segment_batch_parallel.
-            pick_steps = [
-                ("side_face_ac", "Pick the SIDE face at bar end 1 (1/2, for cover)"),
-                ("side_face_bd", "Pick the SIDE face at bar end 2 (2/2, for cover)"),
-            ]
-            self.side_face_ab = None
-            self.side_face_cd = None
+            next_step_msg = "Now pick the Direction Line (Step 2)."
         else:
-            # v1.0.7 -- 4 side faces. The 2 END faces (A-b, c-d) only
-            # cover the first/last bar. The 2 RAIL faces (along A->c,
-            # along b->d) cover EVERY bar, because every bar's 2 endpoints
-            # ride along exactly those 2 edges -- see module docstring /
-            # build_rebar_segment_batch.
-            pick_steps = [
-                ("side_face_ab", "Pick the SIDE face at the A-b end (1/4, for corner cover)"),
-                ("side_face_cd", "Pick the SIDE face at the c-d end (2/4, for corner cover)"),
-                ("side_face_ac", "Pick the SIDE face along rail A -> c (3/4, cover for EVERY bar)"),
-                ("side_face_bd", "Pick the SIDE face along rail b -> d (4/4, cover for EVERY bar)"),
-            ]
-
-        picked = {}
-        for attr_name, prompt in pick_steps:
-            try:
-                ref = uidoc.Selection.PickObject(ObjectType.Face, same_el_filter, prompt)
-            except OperationCanceledException:
-                self._set_status(
-                    "Side face pick cancelled -- click 'Pick Side Faces' "
-                    "again to redo from the start.",
-                    CLR_MUTED,
-                )
-                return
-            except Exception as ex:
-                self._set_status("Pick side face failed: {}".format(str(ex)), CLR_ERROR)
-                return
-
-            try:
-                el = doc.GetElement(ref.ElementId)
-                picked[attr_name] = el.GetGeometryObjectFromReference(ref)
-            except Exception as ex:
-                self._set_status(
-                    "Could not read a picked side face: {}".format(str(ex)), CLR_ERROR
-                )
-                return
-
-            self.tb_pick2_status.Text = "{}/{} side faces picked.".format(len(picked), len(pick_steps))
-            self.tb_pick2_status.Foreground = _brush(CLR_MUTED)
-
-        for attr_name, value in picked.items():
-            setattr(self, attr_name, value)
-
-        self.tb_pick2_status.Text = "OK - all {} side face(s) picked.".format(len(pick_steps))
-        self.tb_pick2_status.Foreground = _brush(CLR_SUCCESS)
-        if layout_mode == "parallel":
-            self._set_status("Side faces picked. Now pick the Direction Line (Step 3).", CLR_MUTED)
-        else:
-            self._set_status("All geometry picked. Click 'Create Rebar' when ready.", CLR_MUTED)
+            next_step_msg = "Click 'Create Rebar' when ready."
+        self._set_status(
+            "Top face + 4 points picked (see the colored crosshairs: A=red, "
+            "b=green, c=blue, d=orange). {}".format(next_step_msg),
+            CLR_MUTED,
+        )
 
     def do_pick_direction(self):
         try:
@@ -1052,16 +962,9 @@ class RebarSegmentWindow(Window):
         mode_item = self.cmb_layout_mode.SelectedItem
         layout_mode = mode_item.Tag if mode_item is not None else "rail"
 
-        # v1.1.1 -- Parallel mode only needs 2 side faces (side_face_ac /
-        # side_face_bd); rail mode still needs all 4.
-        if layout_mode == "parallel":
-            if self.side_face_ac is None or self.side_face_bd is None:
-                self._set_status("Pick both side faces first (Step 2).", CLR_ERROR)
-                return
-        else:
-            if None in (self.side_face_ab, self.side_face_cd, self.side_face_ac, self.side_face_bd):
-                self._set_status("Pick all 4 side faces first (Step 2).", CLR_ERROR)
-                return
+        # v1.2.0 -- no side faces to validate any more in either mode; the
+        # only extra requirement for "parallel" mode is the direction line
+        # (checked further below, same as before).
 
         try:
             spacing_mm = self._parse_positive_float(self.tb_spacing.Text, "Spacing")
@@ -1095,7 +998,6 @@ class RebarSegmentWindow(Window):
             if layout_mode == "parallel":
                 created, partition_value, errors, skipped_short = logic.build_rebar_segment_batch_parallel(
                     doc, self.top_face,
-                    self.side_face_ac, self.side_face_bd,
                     self.top_host,
                     self.pt_a, self.pt_b, self.pt_c, self.pt_d,
                     self.dir_p1, self.dir_p2,
@@ -1104,7 +1006,6 @@ class RebarSegmentWindow(Window):
             else:
                 created, partition_value, errors = logic.build_rebar_segment_batch(
                     doc, self.top_face,
-                    self.side_face_ab, self.side_face_cd, self.side_face_ac, self.side_face_bd,
                     self.top_host,
                     self.pt_a, self.pt_b, self.pt_c, self.pt_d,
                     bar_type, spacing_ft, cover_ft,
@@ -1129,12 +1030,15 @@ class RebarSegmentWindow(Window):
                 CLR_SUCCESS,
             )
 
-        # v1.0.4 -- the rebar itself is now the confirmation; the corner
-        # crosshairs have done their job, so clean them up. Left in place
-        # when there were errors above, so NBT can still see exactly which
-        # corners were used while troubleshooting.
-        if not errors:
-            self._clear_corner_markers()
+        # v1.2.0 -- no longer auto-cleared here even on success: NBT was
+        # troubleshooting a run with bad results (bars placed outside the
+        # host) and the corner crosshairs had already been deleted by the
+        # time he looked, since that run raised no Python exceptions (the
+        # bad placement only showed up as a Revit warning dialog after
+        # Create, not an `errors` entry). The markers now stay up through
+        # Create Rebar regardless of outcome; they're still cleared at the
+        # start of the next Step 1 pick (see _do_pick_geometry_inner) or
+        # by clicking Close.
 
 
 RebarSegmentWindow().Show()

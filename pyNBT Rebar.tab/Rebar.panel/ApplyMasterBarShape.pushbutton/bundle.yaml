@@ -1,0 +1,10 @@
+title: |-
+  Apply Master
+  Bar Shape
+tooltip: >-
+  Companion to Circular Rebar Array (Phase 3). Select all bars in the
+  array plus the master bar you hand-corrected (Edit Sketch), then click
+  the master bar - the tool auto-detects every other bar's own position
+  and re-creates it, scaled from the master's shape to its own true
+  radius at the top. No manual bar count needed.
+author: NBT

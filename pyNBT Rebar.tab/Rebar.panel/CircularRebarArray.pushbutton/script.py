@@ -215,6 +215,92 @@ green Model Line (profile mode only) represents the through-center
 cutting plane used to derive the bar's shape; the bar's own rod is
 supposed to stay near the surface, exactly like NBT's own hand-tied
 rebar.
+
+v1.4.0 (2026-09-17): new feature - "stagger with existing bars" for adding
+a second (or third...) batch of bars to a column that already has a
+finished array on it, without disturbing the bars already there. NBT's
+real problem: with 50 bars already placed (and, above them, crossheads
+already correctly shaped by the separate Apply Master Bar Shape tool), he
+sometimes needs to add more bars staggered between the existing ones
+(e.g. another 50, or a different count). Simply re-running this tool from
+scratch at a new starting angle and rotating the whole new batch into
+place is exactly what breaks things: any per-bar crosshead shape already
+matched to a specific angle by Apply Master Bar Shape stops matching once
+that bar's angle is manually nudged after the fact.
+
+The fix: the tool now supports TWO entry points, chosen automatically by
+what NBT selects before running (no extra pre-step): selecting a normal
+column/pier element works exactly as before (fresh array from scratch).
+Selecting ONE existing REBAR bar instead switches to stagger mode: the
+tool reads that bar's REAL host via RebarHostData (same technique proven
+in Apply Master Bar Shape), re-finds the host's base circle exactly as
+before, then reads the reference bar's own placement radius and angle
+directly from its real geometry (not from any assumption about how the
+original array was created) and scans every OTHER Rebar hosted on the
+same element for ones sitting at that same radius (within a small
+tolerance) to build the full list of real existing angles - this works
+even if the existing bars were nudged by hand or the original count is
+no longer known. NBT does not need to tell the tool how many bars already
+exist; the tool counts them itself from the model and reports that count
+back in the result popup so NBT can sanity-check it.
+
+Given that real existing-angle list and a NEW bar count (which does NOT
+have to equal the existing count), find_best_stagger_offset() searches
+candidate starting angles for the new, evenly-spaced batch and picks the
+one that maximizes the SMALLEST angular gap between any new bar and any
+existing bar - i.e. spreads the new batch as far from the old one as
+geometrically possible, rather than assuming a clean half-step offset
+that only works when the two counts match. The new bars reuse the
+reference bar's own bar type and placement radius directly (no re-typing
+cover/bar type), and are created fresh at their final computed angles in
+one Transaction - the existing bars, and any crosshead shaping already
+applied to them, are never touched or rotated. The result popup reports
+the detected existing count, the chosen offset, and the minimum angular
+gap actually achieved (degrees) so NBT can see the stagger really avoided
+overlapping the old bars.
+
+v1.4.1 (2026-09-17): fixed an import bug in v1.4.0 (MultiplanarOption lives
+in Autodesk.Revit.DB.Structure, not Autodesk.Revit.DB - the tool threw an
+ImportError on open, so nobody could test stagger mode at all). Also
+changed the entry UX per NBT's direct feedback: v1.4.0 required picking the
+reference bar BEFORE running the tool at all, with no way to switch into
+stagger mode from a dialog already open on a normal column selection. The
+"Stagger with existing bars" checkbox is now a real, clickable control when
+the dialog opened in fresh mode: ticking it closes the dialog, prompts NBT
+to pick one existing rebar bar, then reopens the window already in stagger
+mode built from that bar's real host - carrying over whatever count/length/
+profile values he had already typed so ticking the box does not reset his
+work. Implemented as a small loop in main() rather than a modeless/
+ExternalEvent window, since PickObject only needs to run between two modal
+dialogs, not while one is open.
+
+v1.4.2 (2026-09-17): NBT's first real test of stagger mode (on the actual
+crosshead/pier-cap element, ~99 existing bars) hit "Could not determine
+this bar's real host element" - RebarHostData.GetRebarHostData() returned
+None for a bar that has a real, working host, exactly the same failure
+mode already hit and worked around in Apply Master Bar Shape's host
+auto-detection. Two fixes: (1) when RebarHostData fails for the reference
+bar, the tool now falls back to asking NBT to pick the host column/pier
+directly (PickObject) instead of giving up on staggering entirely; (2)
+collect_matching_array_angles() no longer uses RebarHostData at all to
+decide which nearby bars belong to this array - if it fails for one bar in
+a real array it likely fails for all of them, which would have silently
+returned an empty existing-bars list and defeated the whole point of
+staggering. It now uses a purely geometric match instead: same placement
+radius from the true center (within tolerance) AND same base Z (within
+500mm) as the reference bar - both read directly from real curve geometry,
+no host API involved.
+
+v1.4.3 (2026-09-17): NBT asked for the profile-mode center-reference lines
+(added in v1.3.3 as a visual double-check on each bar's cutting plane) to
+be cleaned up automatically once they have served that purpose, as long as
+doing so does not break anything else - they were never something the
+bars themselves depend on, only a way for NBT to visually confirm the
+plane passes through the true center. create_center_reference_lines() now
+also returns the ElementIds of every line and sketch plane it created, and
+on_create() deletes them right after (still inside the same, not-yet-
+committed Transaction as the bars) - so they briefly exist for the popup's
+diagnostics but are never actually left behind in the finished model.
 """
 
 __title__ = 'Circular\nRebar Array'
@@ -245,9 +331,15 @@ from Autodesk.Revit.DB import (
     XYZ, Line, Curve, CurveLoop, Transaction, Options, GeometryInstance, Solid,
     SolidUtils, PlanarFace, Arc, Ellipse, FilteredElementCollector, Element,
     GeometryCreationUtilities, BooleanOperationsUtils, BooleanOperationsType,
-    Plane, SketchPlane
+    Plane, SketchPlane, Outline, BoundingBoxIntersectsFilter, ElementId
 )
-from Autodesk.Revit.DB.Structure import Rebar, RebarStyle, RebarHookOrientation, RebarBarType
+from Autodesk.Revit.DB.Structure import (
+    Rebar, RebarStyle, RebarHookOrientation, RebarBarType, MultiplanarOption
+)
+try:
+    from Autodesk.Revit.DB.Structure import RebarHostData
+except Exception:
+    RebarHostData = None
 from Autodesk.Revit.UI.Selection import ObjectType
 import Autodesk.Revit.Exceptions as RevitExceptions
 
@@ -268,7 +360,7 @@ doc = revit.doc
 uidoc = revit.uidoc
 
 TOOL_NAME = 'Circular Rebar Array'
-TOOL_VERSION = 'v1.3.6'
+TOOL_VERSION = 'v1.4.3'
 
 
 # ---------------------------------------------------------------------------
@@ -738,15 +830,32 @@ def get_rebar_bar_types(document):
     return named
 
 
-def bar_angles(count):
-    """Evenly-spaced angles (radians) and their horizontal direction unit
-    vectors around the circle - the single shared layout used by both the
-    simple straight mode and the profile-following mode, so bar N is always
-    at the same position in either mode."""
+def bar_angles(count, offset_rad=0.0):
+    """Evenly-spaced angles (radians, starting at `offset_rad`) and their
+    horizontal direction unit vectors around the circle - the single shared
+    layout used by both the simple straight mode and the profile-following
+    mode, so bar N is always at the same position in either mode. `offset_rad`
+    defaults to 0.0 (unchanged behavior); v1.4.0 uses a non-zero offset for
+    stagger mode, where the whole evenly-spaced batch is rotated as one to
+    the angle find_best_stagger_offset() picked."""
     result = []
     for i in range(count):
-        angle = 2.0 * math.pi * i / count
+        angle = offset_rad + 2.0 * math.pi * i / count
         result.append(XYZ(math.cos(angle), math.sin(angle), 0.0))
+    return result
+
+
+def build_bar_lines_fixed_radius(center, placement_radius_ft, directions, length_ft):
+    """Same shape as build_bar_lines(), but takes the placement radius
+    directly instead of deriving it from column-radius/cover/bar-diameter.
+    Used in v1.4.0 stagger mode: the new bars reuse the reference bar's own
+    already-real placement radius, so there is nothing left to derive."""
+    result = []
+    for direction in directions:
+        base_pt = center + direction.Multiply(placement_radius_ft)
+        top_pt = XYZ(base_pt.X, base_pt.Y, base_pt.Z + length_ft)
+        line = Line.CreateBound(base_pt, top_pt)
+        result.append(([line], direction))
     return result
 
 
@@ -784,9 +893,16 @@ def create_center_reference_lines(document, center, base_z, top_z, directions, h
     sits near the outer surface and never visually reaches the center),
     this line starts AT the center and is a normal, independent Model Line
     NBT can select, snap to, edit, or delete freely.
-    Returns (created_count, list_of_error_strings)."""
+    v1.4.3: also returns the ElementIds of every line and sketch plane it
+    created - NBT asked for these to be auto-deleted right after they have
+    served their purpose (they were only ever a visual double-check, not
+    something the bars themselves depend on), so the caller can clean them
+    up before the Transaction commits and nothing is left behind in the
+    model.
+    Returns (created_count, list_of_error_strings, list_of_created_ids)."""
     created = 0
     errors = []
+    created_ids = []
     span_z = top_z if (top_z is not None and top_z > base_z) else base_z
     for idx, direction in enumerate(directions):
         try:
@@ -799,11 +915,13 @@ def create_center_reference_lines(document, center, base_z, top_z, directions, h
                 center.Y + direction.Y * half_extent,
                 span_z)
             line = Line.CreateBound(start_pt, end_pt)
-            document.Create.NewModelCurve(line, sketch_plane)
+            model_curve = document.Create.NewModelCurve(line, sketch_plane)
             created += 1
+            created_ids.append(model_curve.Id)
+            created_ids.append(sketch_plane.Id)
         except Exception as ex:
             errors.append('Reference line {}: {}'.format(idx + 1, str(ex)))
-    return created, errors
+    return created, errors, created_ids
 
 
 def create_radial_bars(document, host, bar_type, bars):
@@ -840,27 +958,172 @@ def create_radial_bars(document, host, bar_type, bars):
 
 
 # ---------------------------------------------------------------------------
+# v1.4.0 stagger-mode helpers
+# ---------------------------------------------------------------------------
+
+def get_rebar_host(rebar):
+    """Real host element of `rebar`, read from the model via RebarHostData -
+    the same technique proven in Apply Master Bar Shape - rather than
+    trusting any assumption about how the bar was originally created.
+    Returns None if it cannot be resolved (RebarHostData unavailable, or it
+    returns nothing for this bar)."""
+    if RebarHostData is None:
+        return None
+    try:
+        host_data = RebarHostData.GetRebarHostData(rebar)
+        if host_data is None:
+            return None
+        return host_data.GetHostElement()
+    except Exception:
+        return None
+
+
+def get_rebar_angle_radius_z(rebar, center_xy):
+    """(angle_rad, radius_ft, z_ft) of `rebar`'s own first centerline point,
+    measured from center_xy in the XY plane - read directly from the bar's
+    real current geometry (works even if it was nudged by hand since
+    creation). Returns (None, None, None) if the geometry cannot be read."""
+    try:
+        curves = list(rebar.GetCenterlineCurves(
+            False, False, False, MultiplanarOption.IncludeOnlyPlanarCurves, 0))
+        if not curves:
+            return None, None, None
+        p0 = curves[0].GetEndPoint(0)
+    except Exception:
+        return None, None, None
+    dx, dy = p0.X - center_xy.X, p0.Y - center_xy.Y
+    radius = math.sqrt(dx * dx + dy * dy)
+    if radius < 1e-9:
+        return None, None, None
+    return math.atan2(dy, dx), radius, p0.Z
+
+
+def _rebar_candidates_near(document, host):
+    """Rebar elements whose bounding box is near `host`'s - a cheap spatial
+    pre-filter (BoundingBoxIntersectsFilter) so collect_matching_array_angles
+    does not have to scan EVERY Rebar in the whole document - important on a
+    real project that can have thousands of rebar across many columns. Falls
+    back to scanning every Rebar in the document if the host has no bounding
+    box for some reason."""
+    bbox = host.get_BoundingBox(None)
+    if bbox is None:
+        return FilteredElementCollector(document).OfClass(Rebar).ToElements()
+    margin = mm_to_internal(3000.0)  # generously larger than any realistic array radius
+    min_pt = XYZ(bbox.Min.X - margin, bbox.Min.Y - margin, bbox.Min.Z - margin)
+    max_pt = XYZ(bbox.Max.X + margin, bbox.Max.Y + margin, bbox.Max.Z + margin)
+    try:
+        outline = Outline(min_pt, max_pt)
+        spatial_filter = BoundingBoxIntersectsFilter(outline)
+        return (FilteredElementCollector(document).OfClass(Rebar)
+                .WherePasses(spatial_filter).ToElements())
+    except Exception:
+        return FilteredElementCollector(document).OfClass(Rebar).ToElements()
+
+
+def collect_matching_array_angles(document, host, center_xy, ref_radius_ft,
+                                   ref_z_ft, exclude_id, tol_ft, z_tol_ft):
+    """Scan Rebar near `host` (spatially pre-filtered, see
+    _rebar_candidates_near) whose own placement radius is within tol_ft of
+    ref_radius_ft AND whose base Z is within z_tol_ft of ref_z_ft - i.e. the
+    same radial array as the reference bar (same radius, same base
+    elevation), as opposed to unrelated rebar nearby (main longitudinal
+    bars, ties, a different array at a different radius, or a bar on a
+    neighboring column that happens to land in the spatial pre-filter).
+
+    v1.4.2: this deliberately does NOT use RebarHostData to confirm the
+    match, even though get_rebar_host() exists and is tried first for the
+    reference bar itself - NBT's own test showed RebarHostData.
+    GetRebarHostData() can return None even for a bar with a real, working
+    host (the exact same failure mode already hit and worked around in
+    Apply Master Bar Shape's host auto-detection), and if it fails for one
+    bar in a real array it is likely to fail for ALL of them, which would
+    silently return an empty existing-bars list here and defeat the entire
+    point of staggering. Radius + Z proximity is a purely geometric check
+    that does not depend on that API at all.
+
+    Returns a sorted list of real angles (radians). `exclude_id` (the
+    reference bar's own id) is skipped here and added back by the caller, so
+    it is only ever read once."""
+    angles = []
+    for rebar in _rebar_candidates_near(document, host):
+        if rebar.Id == exclude_id:
+            continue
+        angle, radius, z = get_rebar_angle_radius_z(rebar, center_xy)
+        if angle is None:
+            continue
+        if abs(z - ref_z_ft) > z_tol_ft:
+            continue
+        if abs(radius - ref_radius_ft) > tol_ft:
+            continue
+        angles.append(angle)
+    return sorted(angles)
+
+
+def find_best_stagger_offset(existing_angles, new_count, samples=360):
+    """Search starting angles for a new batch of `new_count` evenly-spaced
+    bars (spacing = 2*pi/new_count) and return (best_offset_rad,
+    min_gap_deg): the offset that maximizes the SMALLEST angular gap between
+    any new bar and any bar already in `existing_angles`, and that achieved
+    gap in degrees. Only offsets in [0, spacing) need to be tried - shifting
+    by a further whole spacing just relabels which new bar sits at which
+    absolute angle, the resulting SET of angles is identical - so this stays
+    cheap even at fine resolution. If there are no existing angles at all
+    (e.g. the reference bar's own array could not be scanned), returns
+    offset 0.0 and a large gap (nothing to avoid)."""
+    if not existing_angles:
+        return 0.0, 180.0
+    spacing = 2.0 * math.pi / new_count
+    two_pi = 2.0 * math.pi
+    best_offset = 0.0
+    best_min_gap = -1.0
+    for s in range(samples):
+        candidate = spacing * s / float(samples)
+        min_gap = None
+        for k in range(new_count):
+            new_angle = candidate + k * spacing
+            for old_angle in existing_angles:
+                d = abs((new_angle - old_angle + math.pi) % two_pi - math.pi)
+                if min_gap is None or d < min_gap:
+                    min_gap = d
+                    if min_gap <= best_min_gap:
+                        break  # cannot beat the current best any more - skip ahead
+            if min_gap is not None and min_gap <= best_min_gap:
+                break
+        if min_gap is not None and min_gap > best_min_gap:
+            best_min_gap = min_gap
+            best_offset = candidate
+    return best_offset, math.degrees(best_min_gap)
+
+
+# ---------------------------------------------------------------------------
 # Selection helper
 # ---------------------------------------------------------------------------
 
-def get_host_element():
-    """Return the pre-selected element, or prompt the user to pick one.
-    Returns None if there is no usable single-element selection (and the
-    user is told why)."""
+def get_host_or_reference_bar():
+    """Return (mode, element): mode is 'fresh' with a normal host element
+    (exactly the old behavior), or 'stagger' with an existing Rebar element
+    the user selected to add a staggered batch next to. Returns (None, None)
+    if there is no usable single-element selection (and the user is told
+    why, or the pick was cancelled)."""
     selected_ids = list(uidoc.Selection.GetElementIds())
     if len(selected_ids) == 1:
-        return doc.GetElement(selected_ids[0])
+        elem = doc.GetElement(selected_ids[0])
+        return ('stagger', elem) if isinstance(elem, Rebar) else ('fresh', elem)
     if len(selected_ids) > 1:
         forms.alert(
             'Please select exactly one element (you have {} selected).'.format(len(selected_ids)),
             title=TOOL_NAME,
         )
-        return None
+        return None, None
     try:
-        ref = uidoc.Selection.PickObject(ObjectType.Element, 'Select the circular column/pier element')
-        return doc.GetElement(ref.ElementId)
+        ref = uidoc.Selection.PickObject(
+            ObjectType.Element,
+            'Select the circular column/pier element (new array), OR select '
+            'ONE existing rebar bar to add a staggered batch next to it')
+        elem = doc.GetElement(ref.ElementId)
+        return ('stagger', elem) if isinstance(elem, Rebar) else ('fresh', elem)
     except RevitExceptions.OperationCanceledException:
-        return None
+        return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -917,7 +1180,8 @@ System_VerticalAlignment_Center = _VA.Center
 class CircularRebarArrayWindow(Window):
     def __init__(self, host, center, radius_ft, bar_types,
                  pier_solids=None, top_z=None, axis_dir=None, axis_source=None,
-                 half_extent=None):
+                 half_extent=None, stagger_info=None,
+                 initial_count='8', initial_length='3000', initial_profile=False):
         self.host = host
         self.center = center
         self.radius_ft = radius_ft
@@ -928,6 +1192,24 @@ class CircularRebarArrayWindow(Window):
         self.axis_dir = axis_dir
         self.axis_source = axis_source
         self.half_extent = half_extent
+        # v1.4.0 stagger mode: None for a normal fresh array, or a dict with
+        # 'bar_type' (RebarBarType), 'ref_radius_ft', 'existing_angles'
+        # (sorted list, radians), 'existing_count' (int) - see
+        # get_host_or_reference_bar()/main() for how this is built.
+        self.stagger_info = stagger_info
+        # v1.4.1: carried-over field values when this window is being
+        # rebuilt right after the user ticked "Stagger with existing bars"
+        # from a fresh-mode dialog and picked a reference bar - so NBT does
+        # not lose whatever count/length/profile choice he had already typed.
+        self.initial_count = initial_count
+        self.initial_length = initial_length
+        self.initial_profile = initial_profile
+        # Set True (by on_stagger_toggle) when NBT ticks the stagger checkbox
+        # from a fresh-mode dialog - main()'s loop reads this after
+        # ShowDialog() returns to know it should prompt for a reference bar
+        # and reopen the window in stagger mode, instead of treating the
+        # close as Cancel.
+        self.request_stagger_pick = False
         # Diagnostic only (shown in the result message so a real modeling
         # gap between solids - vs. a code bug - is visible without needing
         # a separate hand-drawn illustration to track down): each solid's
@@ -963,7 +1245,12 @@ class CircularRebarArrayWindow(Window):
         title_tb.FontSize = 15
         title_tb.Foreground = theme.brush(theme.CLR_HEADER_TEXT)
         sub_tb = TextBlock()
-        sub_tb.Text = 'Detected radius: {:.0f} mm'.format(internal_to_mm(radius_ft))
+        if self.stagger_info is not None:
+            sub_tb.Text = 'Stagger mode - {} existing bar(s) detected at radius {:.0f} mm'.format(
+                self.stagger_info['existing_count'],
+                internal_to_mm(self.stagger_info['ref_radius_ft']))
+        else:
+            sub_tb.Text = 'Detected radius: {:.0f} mm'.format(internal_to_mm(radius_ft))
         sub_tb.FontSize = 11
         sub_tb.Foreground = theme.brush(theme.CLR_HEADER_SUB)
         sub_tb.Margin = Thickness(0, 2, 0, 0)
@@ -994,27 +1281,70 @@ class CircularRebarArrayWindow(Window):
         Grid.SetRow(content, 1)
         outer.Children.Add(content)
 
-        _labeled_row(content_panel, 'Bar type')
-        self.combo_bar_type = ComboBox()
-        self.combo_bar_type.ItemsSource = [name for name, _bt in bar_types]
-        if bar_types:
-            self.combo_bar_type.SelectedIndex = 0
-        self.combo_bar_type.Margin = Thickness(0, 0, 0, 12)
-        content_panel.Children.Add(self.combo_bar_type)
+        if self.stagger_info is None:
+            _labeled_row(content_panel, 'Bar type')
+            self.combo_bar_type = ComboBox()
+            self.combo_bar_type.ItemsSource = [name for name, _bt in bar_types]
+            if bar_types:
+                self.combo_bar_type.SelectedIndex = 0
+            self.combo_bar_type.Margin = Thickness(0, 0, 0, 12)
+            content_panel.Children.Add(self.combo_bar_type)
+        else:
+            self.combo_bar_type = None
+            info_tb = TextBlock()
+            info_tb.Text = (
+                "Bar type '{}' and placement radius are reused from the "
+                'selected reference bar - not re-entered here.'
+            ).format(Element.Name.GetValue(self.stagger_info['bar_type']))
+            info_tb.TextWrapping = TextWrapping.Wrap
+            info_tb.FontSize = 11
+            info_tb.Foreground = theme.brush(theme.CLR_MUTED)
+            info_tb.Margin = Thickness(0, 0, 0, 12)
+            content_panel.Children.Add(info_tb)
 
-        self.txt_count = self._add_field(content_panel, 'Number of bars', '8')
-        self.txt_cover = self._add_field(content_panel, 'Cover (mm)', '40')
-        self.txt_length = self._add_field(content_panel, 'Bar length (mm)', '3000')
+        count_label = 'Number of NEW bars to add' if self.stagger_info is not None else 'Number of bars'
+        self.txt_count = self._add_field(content_panel, count_label, self.initial_count)
+
+        if self.stagger_info is None:
+            self.txt_cover = self._add_field(content_panel, 'Cover (mm)', '40')
+        else:
+            self.txt_cover = None
+
+        self.txt_length = self._add_field(content_panel, 'Bar length (mm)', self.initial_length)
 
         self.chk_profile = CheckBox()
         self.chk_profile.Content = 'Follow crosshead profile above shaft (experimental)'
         self.chk_profile.Margin = Thickness(0, 6, 0, 0)
         self.chk_profile.Foreground = theme.brush(theme.CLR_TEXT)
+        self.chk_profile.IsChecked = bool(self.initial_profile)
         if self.top_z is None:
             self.chk_profile.IsEnabled = False
+            self.chk_profile.IsChecked = False
             self.chk_profile.Content = (
                 'Follow crosshead profile (disabled - no upper face detected)')
         content_panel.Children.Add(self.chk_profile)
+
+        # v1.4.1: when a normal column/pier was selected (fresh mode), the
+        # checkbox is now a real, clickable control - ticking it closes this
+        # dialog and main()'s loop prompts NBT to pick a reference bar, then
+        # reopens the window already in stagger mode. When stagger mode was
+        # entered directly (an existing bar was selected before running the
+        # tool), the checkbox instead just confirms that as a read-only
+        # indicator - there is nothing left to pick.
+        self.chk_stagger = CheckBox()
+        self.chk_stagger.Margin = Thickness(0, 6, 0, 0)
+        self.chk_stagger.Foreground = theme.brush(theme.CLR_TEXT)
+        if self.stagger_info is not None:
+            self.chk_stagger.IsChecked = True
+            self.chk_stagger.IsEnabled = False
+            self.chk_stagger.Content = (
+                'Stagger with existing bars (active - an existing bar was selected)')
+        else:
+            self.chk_stagger.IsChecked = False
+            self.chk_stagger.IsEnabled = True
+            self.chk_stagger.Content = 'Stagger with existing bars (tick to pick a reference bar)'
+            self.chk_stagger.Checked += self.on_stagger_toggle
+        content_panel.Children.Add(self.chk_stagger)
 
         self.status_tb = TextBlock()
         self.status_tb.Text = ''
@@ -1065,11 +1395,21 @@ class CircularRebarArrayWindow(Window):
         self.DialogResult = False
         self.Close()
 
+    def on_stagger_toggle(self, sender, args):
+        """Fires once, when NBT ticks the (fresh-mode-only) stagger checkbox.
+        This window cannot run Revit's element picker itself while open as a
+        modal dialog, so it just records the request and closes - main()'s
+        loop does the actual PickObject call and reopens a new window in
+        stagger mode with the picked bar's real host/existing angles."""
+        self.request_stagger_pick = True
+        self.DialogResult = False
+        self.Close()
+
     def on_create(self, sender, args):
         try:
             count = int(self.txt_count.Text.strip())
-            cover_mm = float(self.txt_cover.Text.strip())
             length_mm = float(self.txt_length.Text.strip())
+            cover_mm = float(self.txt_cover.Text.strip()) if self.txt_cover is not None else None
         except Exception:
             self.status_tb.Text = 'Number of bars / cover / length must be valid numbers.'
             self.status_tb.Foreground = theme.brush(theme.CLR_ERROR)
@@ -1080,34 +1420,52 @@ class CircularRebarArrayWindow(Window):
             self.status_tb.Foreground = theme.brush(theme.CLR_ERROR)
             return
 
-        if self.combo_bar_type.SelectedIndex < 0:
-            self.status_tb.Text = 'Please select a bar type.'
-            self.status_tb.Foreground = theme.brush(theme.CLR_ERROR)
-            return
-
-        bar_type = self.bar_types[self.combo_bar_type.SelectedIndex][1]
-        bar_diameter_ft = get_bar_model_diameter_ft(bar_type)
-        bar_radius_ft = bar_diameter_ft / 2.0
-
-        cover_ft = mm_to_internal(cover_mm)
         length_ft = mm_to_internal(length_mm)
+        stagger_note = ''
 
-        placement_radius_ft = self.radius_ft - cover_ft - bar_radius_ft
-        if placement_radius_ft <= 0:
-            self.status_tb.Text = (
-                'Cover + bar diameter is larger than the detected radius '
-                '({:.0f} mm) - reduce cover or check the bar type.'.format(
-                    internal_to_mm(self.radius_ft)))
-            self.status_tb.Foreground = theme.brush(theme.CLR_ERROR)
-            return
+        if self.stagger_info is not None:
+            # v1.4.0 stagger mode: bar type and placement radius come from
+            # the reference bar itself, not from dialog fields.
+            bar_type = self.stagger_info['bar_type']
+            bar_diameter_ft = get_bar_model_diameter_ft(bar_type)
+            bar_radius_ft = bar_diameter_ft / 2.0
+            placement_radius_ft = self.stagger_info['ref_radius_ft']
+            offset_dist = self.radius_ft - placement_radius_ft  # equivalent cover+bar_radius, whatever the old array actually used
+            best_offset_rad, min_gap_deg = find_best_stagger_offset(
+                self.stagger_info['existing_angles'], count)
+            directions = bar_angles(count, offset_rad=best_offset_rad)
+            stagger_note = (
+                ' ({} existing bar(s) detected; new batch offset by {:.2f} deg; '
+                'minimum angular gap between new and existing bars: {:.2f} deg)'
+            ).format(self.stagger_info['existing_count'], math.degrees(best_offset_rad), min_gap_deg)
+        else:
+            if self.combo_bar_type.SelectedIndex < 0:
+                self.status_tb.Text = 'Please select a bar type.'
+                self.status_tb.Foreground = theme.brush(theme.CLR_ERROR)
+                return
+            bar_type = self.bar_types[self.combo_bar_type.SelectedIndex][1]
+            bar_diameter_ft = get_bar_model_diameter_ft(bar_type)
+            bar_radius_ft = bar_diameter_ft / 2.0
+            cover_ft = mm_to_internal(cover_mm)
+            offset_dist = cover_ft + bar_radius_ft
+            placement_radius_ft = self.radius_ft - offset_dist
+            if placement_radius_ft <= 0:
+                self.status_tb.Text = (
+                    'Cover + bar diameter is larger than the detected radius '
+                    '({:.0f} mm) - reduce cover or check the bar type.'.format(
+                        internal_to_mm(self.radius_ft)))
+                self.status_tb.Foreground = theme.brush(theme.CLR_ERROR)
+                return
+            directions = bar_angles(count)
 
-        directions = bar_angles(count)
         profile_mode = bool(self.chk_profile.IsChecked) and self.top_z is not None
         profile_errors = []
 
         max_center_dev_deg = 0.0
         if profile_mode:
-            offset_dist = cover_ft + bar_radius_ft
+            # offset_dist was already resolved above - from cover+bar_radius
+            # in fresh mode, or from the reference bar's real radius in
+            # stagger mode.
             per_bar_points, slice_errors = build_profile_bars_all(
                 self.pier_solids, self.center, self.center.Z, self.top_z,
                 directions, self.half_extent, offset_dist
@@ -1147,6 +1505,10 @@ class CircularRebarArrayWindow(Window):
                     profile_errors.append('Bar {}: no valid profile points found'.format(idx + 1))
                     continue
                 bars.append((lines, normal_h))
+        elif self.stagger_info is not None:
+            bars = build_bar_lines_fixed_radius(
+                self.center, placement_radius_ft, directions, length_ft
+            )
         else:
             bars = build_bar_lines(
                 self.center, self.radius_ft, directions, cover_ft, bar_radius_ft, length_ft
@@ -1164,9 +1526,20 @@ class CircularRebarArrayWindow(Window):
             created, errors = create_radial_bars(doc, self.host, bar_type, bars)
             ref_lines_created = 0
             if profile_mode:
-                ref_lines_created, ref_line_errors = create_center_reference_lines(
+                ref_lines_created, ref_line_errors, ref_line_ids = create_center_reference_lines(
                     doc, self.center, self.center.Z, self.top_z, directions, self.half_extent)
                 errors = errors + ref_line_errors
+                # v1.4.3: NBT asked for these reference lines to be cleaned
+                # up automatically once they've served their purpose - they
+                # were only ever a visual double-check on the cutting plane,
+                # the bars themselves do not depend on them. Deleted here,
+                # still inside the same (uncommitted) Transaction, so they
+                # never actually appear in the finished model.
+                if ref_line_ids:
+                    try:
+                        doc.Delete(List[ElementId](ref_line_ids))
+                    except Exception as ex:
+                        errors.append('Could not auto-delete reference lines: {}'.format(str(ex)))
             t.Commit()
         except Exception as ex:
             if t.HasStarted():
@@ -1192,8 +1565,8 @@ class CircularRebarArrayWindow(Window):
                 ' (profile mode, long axis from {}; true center (mm): X={:.0f}, Y={:.0f}; '
                 'solids Z-range: {}; height stations: {}; points per bar min/avg/max: {}; '
                 'max angle deviation from true center across all bars: {:.4f} deg '
-                '(should read ~0.0000); {} center-reference lines added - select/edit/delete '
-                'them freely, each runs from the true center along its bar\'s exact angle)'
+                '(should read ~0.0000); {} center-reference lines used internally to derive '
+                'each bar\'s cutting plane, then auto-deleted - not left in the model)'
             ).format(
                 self.axis_source, internal_to_mm(self.center.X), internal_to_mm(self.center.Y),
                 self.solid_ranges_text, stations_total, pts_summary, max_center_dev_deg,
@@ -1201,11 +1574,12 @@ class CircularRebarArrayWindow(Window):
             )
 
         if all_errors:
-            msg = 'Created {} of {} bars.{}{}\n\nErrors:\n{}\n\n[{}]'.format(
-                created, count, diameter_note, mode_note, '\n'.join(all_errors), TOOL_VERSION)
+            msg = 'Created {} of {} bars.{}{}{}\n\nErrors:\n{}\n\n[{}]'.format(
+                created, count, diameter_note, stagger_note, mode_note,
+                '\n'.join(all_errors), TOOL_VERSION)
         else:
-            msg = 'Created {} bars around the circle.{}{}\n\n[{}]'.format(
-                created, diameter_note, mode_note, TOOL_VERSION)
+            msg = 'Created {} bars around the circle.{}{}{}\n\n[{}]'.format(
+                created, diameter_note, stagger_note, mode_note, TOOL_VERSION)
 
         self.DialogResult = True
         self.Close()
@@ -1217,44 +1591,126 @@ class CircularRebarArrayWindow(Window):
 # ---------------------------------------------------------------------------
 
 def main():
-    host = get_host_element()
-    if host is None:
+    mode, elem = get_host_or_reference_bar()
+    if elem is None:
         return
 
-    center, radius_ft, debug_lines = find_bottom_circle(host)
-    if center is None:
-        detail = '\n'.join(debug_lines[:8]) if debug_lines else '(no horizontal planar face found at all)'
-        forms.alert(
-            'Could not find a horizontal, full-circle face on the selected '
-            'element. This Phase-1 tool only supports a straight cylindrical '
-            'shaft (a tapered/oval pier cap is not supported yet).\n\n'
-            'Faces examined:\n{}'.format(detail),
-            title=TOOL_NAME,
+    # v1.4.1: carried-over dialog values, used when the loop below reopens
+    # the window right after NBT ticks "Stagger with existing bars" from a
+    # fresh-mode dialog and picks a reference bar - so he doesn't lose
+    # whatever count/length/profile choice he already typed.
+    carry_count, carry_length, carry_profile = '8', '3000', False
+
+    while True:
+        stagger_info = None
+        reference_bar = None
+        if mode == 'stagger':
+            reference_bar = elem
+            host = get_rebar_host(reference_bar)
+            if host is None:
+                # v1.4.2: RebarHostData can return None even for a bar with a
+                # real, working host (same failure mode already hit in Apply
+                # Master Bar Shape) - fall back to asking NBT to pick the
+                # host directly instead of giving up on staggering entirely.
+                try:
+                    host_ref = uidoc.Selection.PickObject(
+                        ObjectType.Element,
+                        "Could not auto-detect this bar's host - select the "
+                        'host column/pier element now')
+                    host = doc.GetElement(host_ref.ElementId)
+                except RevitExceptions.OperationCanceledException:
+                    return
+        else:
+            host = elem
+
+        center, radius_ft, debug_lines = find_bottom_circle(host)
+        if center is None:
+            detail = '\n'.join(debug_lines[:8]) if debug_lines else '(no horizontal planar face found at all)'
+            forms.alert(
+                'Could not find a horizontal, full-circle face on the selected '
+                'element. This Phase-1 tool only supports a straight cylindrical '
+                'shaft (a tapered/oval pier cap is not supported yet).\n\n'
+                'Faces examined:\n{}'.format(detail),
+                title=TOOL_NAME,
+            )
+            return
+
+        bar_types = get_rebar_bar_types(doc)
+        if mode == 'fresh' and not bar_types:
+            forms.alert('No Rebar Bar Types found in this project.', title=TOOL_NAME)
+            return
+
+        if mode == 'stagger':
+            center_xy = XYZ(center.X, center.Y, 0.0)
+            ref_angle, ref_radius_ft, ref_z_ft = get_rebar_angle_radius_z(reference_bar, center_xy)
+            if ref_angle is None:
+                forms.alert(
+                    "Could not read the reference bar's own position from its "
+                    'geometry - cannot stagger against it.',
+                    title=TOOL_NAME,
+                )
+                return
+            tol_ft = max(mm_to_internal(15.0), ref_radius_ft * 0.05)
+            z_tol_ft = mm_to_internal(500.0)
+            existing_angles = collect_matching_array_angles(
+                doc, host, center_xy, ref_radius_ft, ref_z_ft,
+                exclude_id=reference_bar.Id, tol_ft=tol_ft, z_tol_ft=z_tol_ft)
+            existing_angles.append(ref_angle)
+            existing_angles.sort()
+            stagger_info = {
+                'bar_type': doc.GetElement(reference_bar.GetTypeId()),
+                'ref_radius_ft': ref_radius_ft,
+                'existing_angles': existing_angles,
+                'existing_count': len(existing_angles),
+            }
+
+        # Phase 3 (experimental): gather what's needed for profile-following
+        # mode. Failure here never blocks Phase 1 - the checkbox just stays
+        # disabled.
+        solids = get_element_solids(host)
+        top_loop, top_z = find_top_face(solids)
+        axis_dir, axis_source = determine_long_axis(top_loop)
+        half_extent = get_half_extent_ft(host)
+        if top_z is not None and top_z <= center.Z + mm_to_internal(50.0):
+            # "top" face found is not meaningfully above the base - e.g. a
+            # plain cylinder with no crosshead above it - treat as no upper
+            # geometry.
+            top_z = None
+
+        window = CircularRebarArrayWindow(
+            host, center, radius_ft, bar_types,
+            pier_solids=solids, top_z=top_z, axis_dir=axis_dir,
+            axis_source=axis_source, half_extent=half_extent,
+            stagger_info=stagger_info,
+            initial_count=carry_count, initial_length=carry_length,
+            initial_profile=carry_profile,
         )
-        return
+        window.ShowDialog()
 
-    bar_types = get_rebar_bar_types(doc)
-    if not bar_types:
-        forms.alert('No Rebar Bar Types found in this project.', title=TOOL_NAME)
-        return
+        if not window.request_stagger_pick:
+            break  # normal close - bars created, or NBT cancelled - done
 
-    # Phase 3 (experimental): gather what's needed for profile-following mode.
-    # Failure here never blocks Phase 1 - the checkbox just stays disabled.
-    solids = get_element_solids(host)
-    top_loop, top_z = find_top_face(solids)
-    axis_dir, axis_source = determine_long_axis(top_loop)
-    half_extent = get_half_extent_ft(host)
-    if top_z is not None and top_z <= center.Z + mm_to_internal(50.0):
-        # "top" face found is not meaningfully above the base - e.g. a plain
-        # cylinder with no crosshead above it - treat as no upper geometry.
-        top_z = None
-
-    window = CircularRebarArrayWindow(
-        host, center, radius_ft, bar_types,
-        pier_solids=solids, top_z=top_z, axis_dir=axis_dir,
-        axis_source=axis_source, half_extent=half_extent,
-    )
-    window.ShowDialog()
+        # NBT ticked the stagger checkbox from a fresh-mode dialog: carry
+        # over whatever he had already typed, then prompt him to pick the
+        # reference bar and loop back to rebuild everything in stagger mode.
+        carry_count = window.txt_count.Text
+        carry_length = window.txt_length.Text
+        carry_profile = bool(window.chk_profile.IsChecked)
+        try:
+            ref = uidoc.Selection.PickObject(
+                ObjectType.Element, 'Select ONE existing rebar bar to stagger against')
+        except RevitExceptions.OperationCanceledException:
+            return
+        picked = doc.GetElement(ref.ElementId)
+        if not isinstance(picked, Rebar):
+            forms.alert(
+                'That is not a rebar bar - please pick an existing rebar bar '
+                'to stagger against.',
+                title=TOOL_NAME,
+            )
+            return
+        elem = picked
+        mode = 'stagger'
 
 
 try:

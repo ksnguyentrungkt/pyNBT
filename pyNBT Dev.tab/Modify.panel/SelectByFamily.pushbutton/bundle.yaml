@@ -1,8 +1,0 @@
-title: |-
-  Select
-  By Family
-tooltip: >
-  Filter the CURRENT SELECTION by Family: pre-select elements in Revit
-  first, then run this tool to group them by Family name with counts,
-  tick the Family(ies) you want, and re-select only those elements.
-author: NBT

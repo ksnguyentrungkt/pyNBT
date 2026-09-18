@@ -181,13 +181,24 @@ def get_diameter_ft(rebar, doc):
     return val if val and val > 0 else None
 
 
-def get_single_centerline(rebar):
-    """Return the single straight Line representing this rebar's centerline.
+def get_bar_curves(rebar):
+    """v1.8 -- return the FULL ordered list of the bar's centerline Line
+    segments (index 0's own start point = the rebar's true start,
+    GetHookTypeId(0)/GetHookOrientation(0)'s end; the last curve's own end
+    point = the rebar's true end, index 1's end).
 
-    Raises ValueError (Vietnamese message, safe to show directly to NBT) if
-    the rebar's shape is not supported by this tool (bar set, bent shape,
-    arc, etc.) -- v1 only supports a single straight bar.
-    """
+    Generalizes get_single_centerline (v1-v1.7.4, which required exactly
+    one straight segment) so bars that are already bent (multiple body
+    segments) can be cut/cranked too -- NBT asked for this (2026-08 image
+    of a vertical bar with an existing bend near the top): "toi dang co
+    thanh thep nhu hinh ... cat tai diem toi chi mui ten mau do ... co the
+    update tool dc k", and confirmed via AskUserQuestion he wants the
+    general case ("Tong quat: moi thanh nhieu doan, moi huong"), not just
+    the one shape in his screenshot.
+
+    Still raises ValueError (safe to show directly to NBT) for a
+    multi-bar set (Layout Rule != Single) or any curved (Arc) segment --
+    arcs are not supported."""
     try:
         n_positions = rebar.NumberOfBarPositions
     except Exception:
@@ -201,17 +212,180 @@ def get_single_centerline(rebar):
     curves = rebar.GetCenterlineCurves(
         True, True, True, MultiplanarOption.IncludeOnlyPlanarCurves, 0
     )
-    if curves is None or len(curves) != 1:
+    if curves is None or len(curves) == 0:
+        raise ValueError("Could not read the bar's shape.")
+    for c in curves:
+        if not isinstance(c, Line):
+            raise ValueError(
+                "The bar has a curved (arc) segment -- arcs are not "
+                "supported by this tool."
+            )
+    return list(curves)
+
+
+ORIENT_HORIZONTAL = "horizontal"
+ORIENT_VERTICAL = "vertical"
+
+
+def classify_segment_orientation(seg_dir):
+    """v1.8 -- classify a (normalized) segment direction as horizontal or
+    vertical for cut/crank purposes -- same thresholds the v1-v1.7.4
+    horizontal-only check used (abs(Z) < 0.01 = horizontal). Anything in
+    between (a sloped/diagonal segment) raises ValueError -- NBT scoped
+    the general-support request to "moi thanh nhieu doan, moi huong", but
+    a genuinely diagonal run has no natural Up/Down or Left/Right axis to
+    reuse and is left out of scope for now."""
+    z = abs(seg_dir.Z)
+    if z < 0.01:
+        return ORIENT_HORIZONTAL
+    if z > 0.99:
+        return ORIENT_VERTICAL
+    raise ValueError(
+        "This part of the bar runs diagonally (neither horizontal nor "
+        "vertical) -- only horizontal or vertical segments are supported "
+        "for cut/crank. Pick a point on a horizontal or vertical run."
+    )
+
+
+def reverse_curve_list(curves):
+    """Return a NEW list of Lines covering the same path in reverse (both
+    list order and each individual Line's own start/end swapped). Used to
+    re-attach an existing unchanged run of curves on whichever side of the
+    new crank geometry it needs to connect from."""
+    return [Line.CreateBound(c.GetEndPoint(1), c.GetEndPoint(0)) for c in reversed(curves)]
+
+
+def locate_pick_segment(curves, raw_pt):
+    """v1.8 -- given the bar's FULL ordered curve list (get_bar_curves) and
+    an arbitrary picked point, find which segment the point lands closest
+    to and return everything the rest of the tool needs about it:
+
+      seg_index        -- index into `curves`
+      seg_start/seg_end -- that segment's own two endpoints (index0/index1
+                           order, i.e. seg_start is the end nearer the
+                           bar's true start)
+      seg_dir           -- normalized seg_start -> seg_end direction
+      pt_on_seg         -- the picked point, projected onto the segment
+      dist_seg_start_ft / dist_seg_end_ft -- axial distance from pt_on_seg
+                           to each end of JUST this segment
+      curves_before/curves_after -- the (possibly empty) unchanged curves
+                           on either side, in their original order/direction
+      dist_true_start_ft / dist_true_end_ft -- axial distance from
+                           pt_on_seg to the bar's TRUE start/end, through
+                           curves_before/curves_after
+      total_len_ft       -- the whole bar's length (all segments summed)
+
+    Raises ValueError if the point doesn't project onto any segment, or
+    lands too close (<5mm) to a segment boundary/bar end -- same tolerance
+    project_point_on_line (v1-v1.7.4) used."""
+    best = None
+    for idx, seg in enumerate(curves):
+        try:
+            result = seg.Project(raw_pt)
+        except Exception:
+            continue
+        if result is None:
+            continue
+        if best is None or result.Distance < best[0]:
+            best = (result.Distance, idx, result.XYZPoint)
+
+    if best is None:
+        raise ValueError("Could not project the clicked point onto the bar.")
+
+    _dist_off, seg_index, pt_on_seg = best
+    seg = curves[seg_index]
+    seg_start = seg.GetEndPoint(0)
+    seg_end = seg.GetEndPoint(1)
+    seg_len_ft = seg_start.DistanceTo(seg_end)
+    dist_seg_start_ft = seg_start.DistanceTo(pt_on_seg)
+    dist_seg_end_ft = seg_len_ft - dist_seg_start_ft
+
+    eps_ft = mm_to_ft(5.0)
+    if dist_seg_start_ft < eps_ft or dist_seg_end_ft < eps_ft:
         raise ValueError(
-            "The bar must be a single straight segment (not already bent) "
-            "for this tool to cut/crank it."
+            "Clicked point is too close to one end of the bar (or to an "
+            "existing bend). Click a position closer to the middle of a "
+            "straight run."
         )
-    line = curves[0]
-    if not isinstance(line, Line):
-        raise ValueError(
-            "The bar must be a straight Line -- arcs are not supported."
-        )
-    return line
+
+    curves_before = list(curves[:seg_index])
+    curves_after = list(curves[seg_index + 1:])
+    cum_before_ft = sum(c.GetEndPoint(0).DistanceTo(c.GetEndPoint(1)) for c in curves_before)
+    cum_after_ft = sum(c.GetEndPoint(0).DistanceTo(c.GetEndPoint(1)) for c in curves_after)
+
+    seg_dir = XYZ(
+        seg_end.X - seg_start.X, seg_end.Y - seg_start.Y, seg_end.Z - seg_start.Z
+    ).Normalize()
+
+    return {
+        "seg_index": seg_index,
+        "seg_start": seg_start,
+        "seg_end": seg_end,
+        "seg_dir": seg_dir,
+        "pt_on_seg": pt_on_seg,
+        "dist_seg_start_ft": dist_seg_start_ft,
+        "dist_seg_end_ft": dist_seg_end_ft,
+        "curves_before": curves_before,
+        "curves_after": curves_after,
+        "dist_true_start_ft": cum_before_ft + dist_seg_start_ft,
+        "dist_true_end_ft": cum_after_ft + dist_seg_end_ft,
+        "total_len_ft": cum_before_ft + seg_len_ft + cum_after_ft,
+    }
+
+
+def derive_plane_norm(seg_dir, curves_before, curves_after, fallback_reference_dir):
+    """v1.8 -- pick the plane normal ("norm", for Rebar.CreateFromCurves)
+    for the new crank geometry.
+
+    `seg_dir` is itself a piece of the ORIGINAL bar, which (having been
+    built by a single Rebar.CreateFromCurves call) is entirely planar
+    already. So if any curve immediately adjacent to the picked segment
+    (in curves_before/curves_after) runs in a genuinely different
+    direction -- i.e. there is a real existing bend next to the pick
+    point, not just a straight continuation -- crossing that curve's
+    direction with `seg_dir` reproduces that SAME existing plane's normal
+    (up to sign), which the new geometry MUST match to stay coplanar with
+    the unchanged curves it gets attached to.
+
+    Falls back to `fallback_reference_dir` crossed with seg_dir (world Z
+    for a horizontal segment, the view's own RightDirection for a
+    vertical one -- see script.py's call site) only when nothing adjacent
+    constrains the plane: a single straight bar (the v1-v1.7.4 case,
+    where this reduces EXACTLY to the old `bar_dir.CrossProduct(BasisZ)`
+    formula), or an existing bend that happens to be collinear with the
+    picked segment."""
+    for c in reversed(curves_before):
+        d = XYZ(
+            c.GetEndPoint(1).X - c.GetEndPoint(0).X,
+            c.GetEndPoint(1).Y - c.GetEndPoint(0).Y,
+            c.GetEndPoint(1).Z - c.GetEndPoint(0).Z,
+        ).Normalize()
+        cross = seg_dir.CrossProduct(d)
+        if cross.GetLength() > 0.01:
+            return cross.Normalize()
+    for c in curves_after:
+        d = XYZ(
+            c.GetEndPoint(1).X - c.GetEndPoint(0).X,
+            c.GetEndPoint(1).Y - c.GetEndPoint(0).Y,
+            c.GetEndPoint(1).Z - c.GetEndPoint(0).Z,
+        ).Normalize()
+        cross = seg_dir.CrossProduct(d)
+        if cross.GetLength() > 0.01:
+            return cross.Normalize()
+    return seg_dir.CrossProduct(fallback_reference_dir).Normalize()
+
+
+def derive_offset_dir(norm, seg_dir):
+    """v1.8 -- the perpendicular direction the 1xD crank offset moves
+    along, derived from the plane normal + the segment's own axial
+    direction. For a horizontal segment with norm = seg_dir x Z (the
+    legacy formula), this reduces EXACTLY to world +Z (verified via the
+    vector identity (A x B) x A = B|A|^2 - A(A.B), with A=seg_dir,
+    B=Z, A.B=0 since seg_dir is horizontal) -- i.e. fully backward
+    compatible with v1-v1.7.4's hardcoded Z offset. For a vertical
+    segment (norm derived from the view's RightDirection), this reduces
+    to that same RightDirection -- the horizontal "lean" NBT asked for."""
+    return norm.CrossProduct(seg_dir).Normalize()
 
 
 # ---------------------------------------------------------------------------
@@ -473,22 +647,75 @@ def resolve_crank_toward_start(crank_side, bar_dir, view_right_dir):
 
 
 def start_is_screen_left(bar_dir, view_right_dir):
-    """v1.7.2 -- True if the ORIGINAL bar's start point (line.GetEndPoint(0))
-    renders on the visual LEFT side of the screen, in the same view/sign
-    convention resolve_crank_toward_start() was calibrated against (NBT's
-    real Revit test, 2026-08-22 -- see that function's docstring). Returns
-    True (assume Start=left) if view_right_dir is unavailable, matching the
-    schematic's original pre-v1.7 behaviour (always anchor Start at the left
-    of the picture) as a safe fallback.
+    """True if the ORIGINAL bar's start point (line.GetEndPoint(0)) renders
+    on the visual LEFT side of the screen. Returns True (assume Start=left)
+    if view_right_dir is unavailable, matching the schematic's original
+    pre-v1.7 behaviour (always anchor Start at the left of the picture) as a
+    safe fallback.
 
     Used ONLY by script.py's preview schematic, to decide which physical
     end (Start or End) should be drawn at the left edge of the 2D diagram so
     it visually matches what actually happens in the Revit view -- it has no
     effect on the real 3D geometry, which is unaffected by how the preview
-    happens to draw it."""
+    happens to draw it.
+
+    v1.7.4 -- v1.7.2 used the SAME sign as resolve_crank_toward_start's
+    calibrated `dot < 0` (on the theory that the preview should mirror
+    whenever the real geometry does). NBT tested that directly against real
+    Revit (multiple bars, 2026-08-22) and reported the preview was STILL
+    backwards -- consistently, every time -- even though the real 3D result
+    itself is confirmed correct. That means the preview's own left/right
+    display needs the OPPOSITE sign from the real-geometry calibration, not
+    the same one (this function is independent of resolve_crank_toward_start
+    on purpose -- it only affects how the picture is drawn, never the real
+    geometry -- so recalibrating it here cannot un-fix the real result)."""
     if view_right_dir is None:
         return True
-    return bar_dir.DotProduct(view_right_dir) < 0
+    return bar_dir.DotProduct(view_right_dir) > 0
+
+
+def resolve_crank_toward_start_general(orientation, crank_side, direction_up, seg_dir, view_right_dir):
+    """v1.8 -- generalized "which end gets the crank" resolution, covering
+    both bar orientations with the SAME two button pairs NBT already has
+    (confirmed via AskUserQuestion: "Dung lai dung 2 nut Left/Right hien
+    co" for the vertical case, rather than adding new buttons):
+
+      HORIZONTAL segment -- unchanged from v1.7.4: the Left/Right buttons
+      (`crank_side`) pick the end, resolved against the current view's
+      screen-right direction (resolve_crank_toward_start).
+
+      VERTICAL segment -- the two physical ends are unambiguously "top"
+      and "bottom" regardless of which view you're looking from, so
+      Left/Right (a screen-relative idea) doesn't apply here. The tool
+      instead reuses the Up/Down buttons (`direction_up`) for this axis,
+      resolved against GLOBAL Z (not the view): 'Up' builds the crank
+      toward whichever end is physically higher.
+
+    NOT yet tested against a real Revit vertical bar -- flag this to NBT
+    and expect it may need a sign flip after his first test, same as
+    every other Left/Right/Up/Down calibration in this tool's history."""
+    if orientation == ORIENT_HORIZONTAL:
+        return resolve_crank_toward_start(crank_side, seg_dir, view_right_dir)
+    start_is_up_end = seg_dir.Z < 0
+    return direction_up == start_is_up_end
+
+
+def resolve_offset_sign_general(orientation, crank_side, direction_up):
+    """v1.8 -- generalized "which way the 1xD crank offset leans" (the
+    axis NOT used by resolve_crank_toward_start_general above):
+
+      HORIZONTAL segment -- unchanged from v1.7.4: Up/Down (`direction_up`)
+      picks the sign, True = +offset_dir (world +Z for a horizontal bar).
+
+      VERTICAL segment -- reuses Left/Right (`crank_side`) instead, since
+      Up/Down is now busy picking the end (see above). True = +offset_dir,
+      which derive_offset_dir works out to be ~the view's own
+      RightDirection for a vertical segment -- so 'Right' leans the crank
+      toward screen-right. NOT yet tested against a real Revit vertical
+      bar -- same caveat as resolve_crank_toward_start_general."""
+    if orientation == ORIENT_HORIZONTAL:
+        return direction_up
+    return crank_side != CRANK_SIDE_LEFT
 
 
 def flip_hook_orientation(orientation):
@@ -610,20 +837,30 @@ def project_point_on_line(line, pick_pt):
 
 
 def compute_full_geometry(
-    start_pt, click_point, bar_dir, diameter_ft, horiz_ft, lap_len_ft,
-    direction_up, dist_start_to_click_ft, total_len_ft,
+    start_pt, click_point, bar_dir, offset_dir, diameter_ft, horiz_ft, lap_len_ft,
+    offset_positive, dist_start_to_click_ft, dist_click_to_far_ft,
     bend_diameter_ft=None,
 ):
     """Compute every point needed for Bar A + Bar B (v1.4 design -- see
     project doc "cut-crank-rebar-tool.md", section "v1.3 -> v1.4"), given:
-      start_pt                -- the ORIGINAL bar's true start (line.GetEndPoint(0))
+      start_pt                -- the reference end the crank is built from
+                                   (the picked segment's own near end -- see
+                                   script.py's _resolve_crank_reference)
       click_point              -- where the user clicked, projected onto the
-                                   ORIGINAL centerline (phuong 1). v1.4: this
-                                   click now marks **P2** (end of the
-                                   diagonal / start of the lap segment),
-                                   NOT P1 (start of the diagonal) as in v1.3.
-      bar_dir                  -- normalized horizontal XYZ, direction start->end of
-                                   the ORIGINAL bar
+                                   picked segment. v1.4: this click now marks
+                                   **P2** (end of the diagonal / start of the
+                                   lap segment), NOT P1 (start of the
+                                   diagonal) as in v1.3.
+      bar_dir                   -- normalized XYZ, direction start_pt->click_point
+                                   (the picked segment's own axial direction,
+                                   possibly negated -- v1-v1.7.4 assumed this
+                                   was always horizontal; v1.8 generalizes to
+                                   any horizontal or vertical direction)
+      offset_dir                -- normalized XYZ, the direction the 1xD
+                                   crank offset moves along (v1-v1.7.4
+                                   hardcoded this to world +Z; v1.8:
+                                   derive_offset_dir -- reduces to that exact
+                                   same +Z for a horizontal segment)
       diameter_ft               -- bar diameter D, feet
       horiz_ft                  -- crank's horizontal projection, feet (v1.5:
                                    pre-computed by the caller via
@@ -633,11 +870,19 @@ def compute_full_geometry(
                                    (v1.5: pre-computed by the caller via
                                    compute_lap_len_ft(), from either an xD
                                    or a direct-mm input mode)
-      direction_up               -- True = crank rises (+Z), False = crank drops (-Z)
+      offset_positive            -- True = crank moves along +offset_dir,
+                                   False = along -offset_dir (v1-v1.7.4:
+                                   this was `direction_up`, True = +Z)
       dist_start_to_click_ft    -- distance from start_pt to click_point (along
-                                   the original bar's axis) -- this IS the
-                                   axial distance from start_pt to P2.
-      total_len_ft              -- the ORIGINAL bar's full length (start to end)
+                                   `bar_dir`) -- this IS the axial distance
+                                   from start_pt to P2.
+      dist_click_to_far_ft      -- axial distance from click_point to the FAR
+                                   end of the picked segment (i.e. that
+                                   segment's own remaining length past the
+                                   click, on Bar B's side) -- v1.8 renamed
+                                   from total_len_ft: any unchanged curves
+                                   beyond that far end are attached by the
+                                   caller (script.py), not built here.
 
     v1.4 design (corrected per NBT, 2026-08-22): Bar A's diagonal runs from
     **P1** (on phuong 1, the ORIGINAL/un-shifted elevation) to **P2** (on
@@ -659,15 +904,16 @@ def compute_full_geometry(
               (this is exactly click_point -- kept as its own key for
               clarity at the call site)
       P3   -- free/connecting end of Bar A's lap segment, on phuong 2
-      P4   -- far end of Bar B (gets the ORIGINAL bar's end hook, if any), on
-              phuong 1
+      P4   -- the picked segment's own far end (script.py attaches any
+              unchanged curves_before/curves_after beyond this point, plus
+              whichever original hook lands there, if any)
       horiz_ft, vert_ft, diagonal_len_ft, lap_len_ft, b_len_ft (Bar B's
       straight length), straight_a_len_ft (Bar A's straight run, start_pt->P1)
 
     Raises ValueError if N*D leaves no room for the straight run before P1,
     or if there's no room left for Bar B past P2.
     """
-    vert_ft = diameter_ft if direction_up else -diameter_ft
+    vert_ft = diameter_ft if offset_positive else -diameter_ft
 
     # v1.6.1 -- block a crank whose horizontal projection is too short for
     # this bar type's own Standard Bend Diameter to fit two clean bends at a
@@ -700,13 +946,17 @@ def compute_full_geometry(
     p1 = XYZ(
         click_point.X - bar_dir.X * horiz_ft,
         click_point.Y - bar_dir.Y * horiz_ft,
-        click_point.Z,
+        click_point.Z - bar_dir.Z * horiz_ft,
     )
-    p2 = XYZ(click_point.X, click_point.Y, click_point.Z + vert_ft)
+    p2 = XYZ(
+        click_point.X + offset_dir.X * vert_ft,
+        click_point.Y + offset_dir.Y * vert_ft,
+        click_point.Z + offset_dir.Z * vert_ft,
+    )
     p3 = XYZ(
         p2.X + bar_dir.X * lap_len_ft,
         p2.Y + bar_dir.Y * lap_len_ft,
-        p2.Z,
+        p2.Z + bar_dir.Z * lap_len_ft,
     )
 
     # Bar B starts on phuong 1 (original elevation) at the SAME axial
@@ -715,12 +965,10 @@ def compute_full_geometry(
     p2b = XYZ(click_point.X, click_point.Y, click_point.Z)
 
     # Bar B's straight length: whatever axial distance is left between P2
-    # and the ORIGINAL bar's far end, so that (Bar A's straight+diagonal
-    # run) + (Bar B's straight run) == the original bar's total length, per
-    # NBT: "tong chieu dai thanh A va thanh B cong lai bang thanh ban dau
-    # (khong tinh phan noi chong)". Unchanged by the v1.4 correction.
-    axial_to_p2_ft = dist_start_to_click_ft
-    b_len_ft = total_len_ft - axial_to_p2_ft
+    # and the picked segment's own far end -- any unchanged curves beyond
+    # that (an existing bend already on that side) are attached by the
+    # caller, not built here (v1.8 -- see dist_click_to_far_ft above).
+    b_len_ft = dist_click_to_far_ft
     if b_len_ft <= mm_to_ft(1.0):
         raise ValueError(
             "The crank (N x D) reaches past the original bar's far end -- "
@@ -731,7 +979,7 @@ def compute_full_geometry(
     p4 = XYZ(
         p2b.X + bar_dir.X * b_len_ft,
         p2b.Y + bar_dir.Y * b_len_ft,
-        p2b.Z,
+        p2b.Z + bar_dir.Z * b_len_ft,
     )
 
     diagonal_len_ft = p1.DistanceTo(p2)
@@ -759,37 +1007,49 @@ def create_cut_crank_bars(
     doc, rebar, bar_type, host, norm, start_pt, p1, p2, p2b, p3, p4,
     start_hook_type=None, start_hook_orient=RebarHookOrientation.Left,
     end_hook_type=None, end_hook_orient=RebarHookOrientation.Left,
+    bar_a_prefix=None, bar_b_suffix=None,
 ):
-    """Delete the original straight `rebar` and create two new Rebar elements
-    (v1.4 design -- Bar B corrected to run on phuong 1, see project doc
+    """Delete the original `rebar` and create two new Rebar elements (v1.4
+    design -- Bar B corrected to run on phuong 1, see project doc
     "cut-crank-rebar-tool.md" section "v1.3 -> v1.4"):
 
-      Bar A: start_pt -> p1 -> p2 -> p3        (3 curves: straight / diagonal
-             crank / lap, on phuong 1 then phuong 2. Keeps the ORIGINAL bar's
-             START hook at start_pt, if any. p3 is a free/connecting end --
-             no hook.)
-      Bar B: p2b -> p4                          (1 curve, straight, on
-             phuong 1 -- the ORIGINAL, un-shifted elevation. p2b sits at the
-             SAME axial position as p2 (directly under/over it), so Bar B's
-             straight run overlaps Bar A's lap segment axially over the lap
-             zone, offset by exactly 1xD -- the lap-splice detail. Keeps the
-             ORIGINAL bar's END hook at p4, if any.)
+      Bar A: [bar_a_prefix] -> start_pt -> p1 -> p2 -> p3   (the new straight
+             / diagonal crank / lap curves, on phuong 1 then phuong 2, with
+             any UNCHANGED existing curves before start_pt prepended as-is
+             -- v1.8, empty for a single-segment bar. Keeps the ORIGINAL
+             bar's START hook at the very first point, if any. p3 is a
+             free/connecting end -- no hook.)
+      Bar B: p2b -> p4 -> [bar_b_suffix]                     (the new
+             straight curve, on phuong 1 -- the ORIGINAL, un-shifted
+             elevation -- with any UNCHANGED existing curves past p4
+             appended as-is -- v1.8, empty for a single-segment bar. p2b
+             sits at the SAME axial position as p2 (directly under/over
+             it), so Bar B's straight run overlaps Bar A's lap segment
+             axially over the lap zone, offset by exactly 1xD -- the
+             lap-splice detail. Keeps the ORIGINAL bar's END hook at the
+             very last point, if any.)
 
     Pass the original rebar's hook type/orientation for each end via
     start_hook_type/start_hook_orient (end 0) and end_hook_type/end_hook_orient
     (end 1) -- read with get_end_hook() BEFORE calling this, since the
-    original rebar is deleted here.
+    original rebar is deleted here. `bar_a_prefix`/`bar_b_suffix` (v1.8) must
+    already be correctly ordered/oriented to connect directly to start_pt /
+    p4 respectively -- see script.py's _resolve_crank_reference (uses
+    reverse_curve_list when the crank was built toward the bar's original
+    END instead of its START).
 
     Returns (bar_a, bar_b).
     """
     doc.Delete(rebar.Id)
+    bar_a_prefix = list(bar_a_prefix) if bar_a_prefix else []
+    bar_b_suffix = list(bar_b_suffix) if bar_b_suffix else []
 
     line_a1 = Line.CreateBound(start_pt, p1)
     line_a2 = Line.CreateBound(p1, p2)
     line_a3 = Line.CreateBound(p2, p3)
     bar_a = Rebar.CreateFromCurves(
         doc, RebarStyle.Standard, bar_type, start_hook_type, None, host, norm,
-        [line_a1, line_a2, line_a3],
+        bar_a_prefix + [line_a1, line_a2, line_a3],
         start_hook_orient, RebarHookOrientation.Left,
         True, True,
     )
@@ -797,7 +1057,7 @@ def create_cut_crank_bars(
     line_b1 = Line.CreateBound(p2b, p4)
     bar_b = Rebar.CreateFromCurves(
         doc, RebarStyle.Standard, bar_type, None, end_hook_type, host, norm,
-        [line_b1],
+        [line_b1] + bar_b_suffix,
         RebarHookOrientation.Left, end_hook_orient,
         True, True,
     )

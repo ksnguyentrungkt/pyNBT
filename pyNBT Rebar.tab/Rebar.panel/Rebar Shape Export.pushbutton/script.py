@@ -16,6 +16,13 @@ segment/arc/angle (API differences across Revit versions), that one falls
 back to a plain text label (with the real error message attached, for
 diagnosis) so nothing is left unlabeled.
 
+Optionally (prompted every run), also exports one PNG image per bar -
+each drawn into its own temporary Drafting View (deleted right after
+export, never left behind), named by Revit's own automatic "Rebar
+Number" (Identity Data, distinct from Mark) - for attaching to a Bar
+Bending Schedule when Revit's own BBS export doesn't show a bar's detail
+clearly enough.
+
 How to use: select one or more Rebar elements in the model (Rebar Set or
 single bar), then click this tool. Non-Rebar elements in the selection
 are skipped. All selected bars are drawn into the SAME new Drafting View.
@@ -36,6 +43,7 @@ Known limitations (Phase 1):
 
 import clr
 import math
+import os
 
 clr.AddReference('RevitAPI')
 clr.AddReference('RevitAPIUI')
@@ -46,9 +54,23 @@ from Autodesk.Revit.DB import (
     XYZ, Line, Arc, Transaction, FilteredElementCollector, ViewFamilyType,
     ViewFamily, View, ViewDrafting, BuiltInParameter, TextNote,
     ElementTypeGroup, Element, Reference, AngularDimension,
-    LinearDimension, RadialDimension
+    LinearDimension, RadialDimension, ElementId, ImageExportOptions,
+    ExportRange, ZoomFitType, ImageResolution, ImageFileType,
+    FitDirectionType
 )
 from Autodesk.Revit.DB.Structure import Rebar, MultiplanarOption
+
+# NumberingSchema/NumberingSchemaTypes give access to Revit's own automatic
+# "Rebar Number" (Identity Data) - a real Revit feature distinct from Mark,
+# used to cross-reference bars in a BBS (Bar Bending Schedule). Imported
+# defensively since this is the first time this tool reads it and the
+# exact namespace has not yet been confirmed against Trung's real Revit -
+# see get_rebar_numbering_schema() below.
+try:
+    from Autodesk.Revit.DB import NumberingSchema, NumberingSchemaTypes
+except Exception:
+    NumberingSchema = None
+    NumberingSchemaTypes = None
 
 from pyrevit import revit, forms
 
@@ -62,6 +84,7 @@ RADIAL_LEADER_LEN_FT = 150.0 / FT_TO_MM  # 150mm - radial dimension leader lengt
 # angular dimension's 50mm placement arc so the two don't visually overlap/clutter at the same corner
 BAR_GAP_FT = 500.0 / FT_TO_MM  # 500mm - horizontal gap between each bar's shape in the shared view
 INVALID_VIEW_CHARS = '\\:{}[]|;<>?`~'
+INVALID_FILENAME_CHARS = '\\/:*?"<>|'
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +256,13 @@ def sanitize_view_name(name):
     return out.strip() or 'Untitled'
 
 
+def sanitize_filename(name):
+    out = name
+    for ch in INVALID_FILENAME_CHARS:
+        out = out.replace(ch, '-')
+    return out.strip() or 'Untitled'
+
+
 def unique_view_name(doc, base_name):
     existing = set()
     for v in FilteredElementCollector(doc).OfClass(View):
@@ -294,6 +324,128 @@ def get_default_radial_dim_type(doc):
     except Exception:
         pass
     return None
+
+
+def get_rebar_numbering_schema(doc):
+    """Revit's own Rebar numbering schema (Manage > Structural Settings >
+    Rebar > Number) - the source of the automatic "Rebar Number" shown in
+    a rebar's Properties panel under Identity Data, distinct from Mark.
+    Numbers are auto-assigned per Partition + matching shape/size, exactly
+    the identifier Trung wants on each exported bar image so it lines up
+    with his BBS (Bar Bending Schedule).
+
+    FIRST ATTEMPT (2026-09-14) at this API - not yet confirmed against
+    Trung's real Revit. Per Autodesk API docs/forum research:
+    `NumberingSchema.GetNumberingSchema(document, NumberingSchemaTypes.
+    StructuralNumberingSchemas.Rebar)`. Returns None if this fails for any
+    reason (older Revit version, wrong namespace, project genuinely has no
+    schema yet) - callers must treat None as "Rebar Number unavailable"
+    and fall back to Mark, never guess/fabricate a number."""
+    if NumberingSchema is None or NumberingSchemaTypes is None:
+        return None
+    try:
+        return NumberingSchema.GetNumberingSchema(
+            doc, NumberingSchemaTypes.StructuralNumberingSchemas.Rebar
+        )
+    except Exception:
+        return None
+
+
+def get_rebar_number_str(rebar, numbering_schema):
+    """Real Revit-assigned "Rebar Number" for one bar (see
+    get_rebar_numbering_schema above). Returns None if unavailable for any
+    reason - caller decides the fallback (Mark), and should tell Trung
+    that a fallback was used rather than silently mislabeling a file."""
+    if numbering_schema is None:
+        return None
+    try:
+        param_id = numbering_schema.NumberingParameterId
+        if param_id is None:
+            return None
+        param = rebar.get_Parameter(param_id)
+        if param is not None and param.HasValue:
+            val = param.AsValueString()
+            if not val:
+                val = param.AsString()
+            if not val:
+                try:
+                    val = str(param.AsInteger())
+                except Exception:
+                    val = None
+            if val and val.strip():
+                return val.strip()
+    except Exception:
+        pass
+    return None
+
+
+def export_view_to_png(doc, view, folder, base_name):
+    """Export one Drafting View to a single PNG file in `folder`, named
+    exactly `base_name` + '.png' (renamed after export - Revit's own
+    ExportImage always prefixes the output with the FilePath value plus
+    the view's own name, so the raw result is renamed to the clean name
+    Trung actually wants). Returns (success, final_path_or_None, error).
+
+    FIRST ATTEMPT (2026-09-14) at PNG export from this tool - not yet
+    confirmed against Trung's real Revit. If `base_name` collides with an
+    already-exported file in this same run (two bars can legitimately
+    share one Rebar Number - Revit's numbering groups identical bars
+    within a Partition together on purpose), a numeric suffix ('_2', '_3',
+    ...) is appended so nothing is silently overwritten.
+
+    IMPORTANT (found 2026-09-18, v1.5.1): Trung's real test of v1.5.0
+    (100 bars selected at once) came back with "Exported 0 bar image(s)"
+    and, for the bars that reported a reason at all, the exact .NET error
+    "Modification of the document is forbidden. Typically, this is
+    because there is no open transaction; consult documentation for
+    Document.IsModified for other possible causes." Confirmed via
+    Autodesk's own Revit API documentation for Document.Regenerate(): its
+    Remarks say "when a transaction is committed there is an automatic
+    call to regenerate the document" - i.e. Regenerate() is unnecessary
+    right after a Commit() - and its Exceptions section documents this
+    EXACT message as what Regenerate() throws when called with no open
+    Transaction. This function is always called from main() AFTER the
+    temp view's own Transaction (t_img) has already been committed, so
+    the `doc.Regenerate()` call that used to be the first line here was
+    calling a document-modifying method with no transaction open at
+    all - guaranteed to throw every single time it was reached. FIX:
+    removed entirely - Commit() already regenerated the document, so
+    there is nothing left for this function to force-update before
+    exporting."""
+    try:
+        options = ImageExportOptions()
+        options.ExportRange = ExportRange.SetOfViews
+        options.ZoomType = ZoomFitType.FitToPage
+        options.FitDirection = FitDirectionType.Horizontal
+        options.PixelSize = 1200
+        options.ImageResolution = ImageResolution.DPI_150
+        options.HLRandWFViewsFileType = ImageFileType.PNG
+        view_ids = List[ElementId]()
+        view_ids.Add(view.Id)
+        options.SetViewsAndSheets(view_ids)
+        temp_prefix = os.path.join(folder, 'pyNBT_temp_export')
+        options.FilePath = temp_prefix
+        doc.ExportImage(options)
+        try:
+            generated_base = options.GetFileName(doc, view.Id)
+            generated_path = generated_base + '.png'
+        except Exception:
+            generated_path = temp_prefix + ' - ' + view.Name + '.png'
+        if not os.path.isfile(generated_path):
+            return False, None, (
+                'ExportImage did not raise, but the expected output file '
+                'was not found at: {}'.format(generated_path)
+            )
+        final_name = base_name
+        suffix = 2
+        while os.path.isfile(os.path.join(folder, final_name + '.png')):
+            final_name = '{}_{}'.format(base_name, suffix)
+            suffix += 1
+        final_path = os.path.join(folder, final_name + '.png')
+        os.rename(generated_path, final_path)
+        return True, final_path, ''
+    except Exception as ex:
+        return False, None, str(ex)
 
 
 def add_linear_dimension(doc, view, detail_curve, line2d):
@@ -721,6 +873,19 @@ def main():
     text_type_id = get_default_text_type_id(doc)
     angular_dim_type = get_default_angular_dim_type(doc)
     radial_dim_type = get_default_radial_dim_type(doc)
+    numbering_schema = get_rebar_numbering_schema(doc)
+
+    export_images = forms.alert(
+        'Also export a PNG image for each bar (in its own temporary view, '
+        'deleted right after export), named by Revit\'s own automatic '
+        '"Rebar Number" (Identity Data - not Mark)?',
+        title=TOOL_NAME, yes=True, no=True
+    )
+    export_folder = None
+    if export_images:
+        export_folder = forms.pick_folder()
+        if not export_folder:
+            export_images = False
 
     # All selected bars are drawn into ONE shared Drafting View, side by
     # side left to right, instead of a separate view per bar. Name it
@@ -734,6 +899,7 @@ def main():
     view_name = unique_view_name(doc, sanitize_view_name(base_name))
 
     created_marks = []
+    processed_rebars = []
     errors = []
 
     t = Transaction(doc, 'pyNBT - Rebar Shape Export')
@@ -752,6 +918,7 @@ def main():
                 width_ft = process_rebar(doc, rebar, view, cursor_x, angular_dim_type, radial_dim_type, text_type_id)
                 cursor_x += width_ft + BAR_GAP_FT
                 created_marks.append(get_mark_str(rebar))
+                processed_rebars.append(rebar)
             except Exception as ex:
                 mark = get_mark_str(rebar)
                 errors.append('Mark {}: {}'.format(mark, str(ex)))
@@ -761,6 +928,61 @@ def main():
             t.RollBack()
         forms.alert('Unexpected error, nothing was created: {}'.format(str(ex)), title=TOOL_NAME)
         return
+
+    image_lines = []
+    if export_images:
+        image_ok = 0
+        image_fail = []
+        used_names = set()
+        for rebar in processed_rebars:
+            rebar_number = get_rebar_number_str(rebar, numbering_schema)
+            used_fallback = False
+            if not rebar_number:
+                rebar_number = get_mark_str(rebar)
+                used_fallback = True
+            base_name = sanitize_filename(rebar_number)
+
+            temp_view_holder = {}
+            t_img = Transaction(doc, 'pyNBT - temp view for image export')
+            t_img.Start()
+            try:
+                temp_view = ViewDrafting.Create(doc, drafting_vft.Id)
+                temp_view.Name = unique_view_name(doc, 'pyNBT_temp_export')
+                process_rebar(doc, rebar, temp_view, 0.0, angular_dim_type, radial_dim_type, text_type_id)
+                t_img.Commit()
+                temp_view_holder['view'] = temp_view
+            except Exception as ex:
+                if t_img.HasStarted():
+                    t_img.RollBack()
+                image_fail.append('{}: could not build temp view ({})'.format(rebar_number, str(ex)))
+                continue
+
+            temp_view = temp_view_holder['view']
+            ok, final_path, err = export_view_to_png(doc, temp_view, export_folder, base_name)
+            if ok:
+                image_ok += 1
+                if used_fallback:
+                    image_fail.append(
+                        '{}: exported OK, but Rebar Number was unavailable - '
+                        'used Mark instead for the file name'.format(base_name)
+                    )
+            else:
+                image_fail.append('{}: {}'.format(base_name, err))
+
+            t_cleanup = Transaction(doc, 'pyNBT - cleanup temp export view')
+            t_cleanup.Start()
+            try:
+                doc.Delete(temp_view.Id)
+                t_cleanup.Commit()
+            except Exception:
+                if t_cleanup.HasStarted():
+                    t_cleanup.RollBack()
+
+        image_lines.append('')
+        image_lines.append('Exported {} bar image(s) to: {}'.format(image_ok, export_folder))
+        if image_fail:
+            image_lines.append('{} image note(s)/failure(s):'.format(len(image_fail)))
+            image_lines.extend('  - {}'.format(m) for m in image_fail)
 
     summary = [
         'Created 1 drafting view ("{}") with {} rebar shape(s):'.format(view_name, len(created_marks))
@@ -774,6 +996,7 @@ def main():
         summary.append('{} rebar(s) could not be processed (likely spiral/'
                         'non-planar shape - not supported yet):'.format(len(errors)))
         summary.extend('  - {}'.format(e) for e in errors)
+    summary.extend(image_lines)
 
     forms.alert('\n'.join(summary), title=TOOL_NAME)
 

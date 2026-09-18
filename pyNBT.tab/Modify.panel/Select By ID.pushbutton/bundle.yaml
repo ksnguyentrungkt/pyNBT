@@ -1,0 +1,10 @@
+title: |-
+  Select
+  By ID
+tooltip: >
+  Select one or more elements in Revit by typing/pasting their Element
+  ID(s) - works for ANY element with an ID (walls, families, model
+  lines, tags, dimensions, etc.), not just typical model elements. Paste
+  IDs separated by comma, space, or new line - invalid or not-found IDs
+  are skipped and listed, and the view auto-zooms to fit the selection.
+author: NBT

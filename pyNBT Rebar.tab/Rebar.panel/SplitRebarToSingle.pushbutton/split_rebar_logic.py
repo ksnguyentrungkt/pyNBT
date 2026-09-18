@@ -54,6 +54,51 @@ either one (see _shape_is_reliably_planar) - only proceed when the two
 agree; otherwise treat the shape as genuinely 3D/warped and leave it
 completely untouched, exactly like any other unsupported shape.
 
+v1.0.2 (2026-09-17) - Two more safety nets, added after another "shape
+lost" report on the same curved-wall scenario that could not be
+re-diagnosed live (Revit connection was down at the time), so instead
+of trusting the v1.0.1 check alone, the tool now VERIFIES its own
+result instead of only pre-checking the input:
+  1. _shape_is_reliably_planar now also compares each pair of curves
+     one-by-one (not just the two total lengths) - two genuinely
+     different curve sets could coincidentally sum to the same total
+     length, which would have slipped past the v1.0.1 check.
+  2. After Rebar.CreateFromCurves actually builds a new bar, its real
+     built length is measured back (GetCenterlineCurves again, this
+     time on the NEW bar) and compared to the original bar position's
+     true length. Any mismatch deletes the just-built bar immediately
+     and fails loudly, instead of leaving a silently-wrong bar behind.
+  3. convert_rebar_to_singles now also refuses to finish a Set/Free
+     Form conversion if two or more of the newly-built bars start at
+     the same point - by definition every bar position is a physically
+     distinct bar, so an exact-duplicate start point is a hard proof
+     that Revit's curve extraction returned the same wrong geometry
+     more than once (the exact symptom from the very first incident).
+
+v1.0.3 (2026-09-17) - TRUE ROOT CAUSE FOUND AND FIXED, live on NBT's
+actual curved-wall Free Form Rebar (Id 27602943, host Wall Id 27602796,
+25 bar positions). The v1.0.2 post-build length check (#2 above) fired
+on EVERY position: expected 49.7405 ft (confirmed correct - matches
+Revit's own GetCenterlineCurves on the ORIGINAL bar exactly), but the
+just-built new bar always came back 68.5290 ft - the exact same wrong
+length reported in the very first v1.0.0 incident, on a totally
+different rebar, which is what finally proved this was never about
+curve extraction (IncludeOnlyPlanarCurves) at all: the extracted input
+curves were correct and provably planar the whole time. The bug is in
+Rebar.CreateFromCurves(...) itself: the second-to-last argument,
+`useExistingShapeIfPossible`, was passed as True, which lets Revit
+snap the new bar onto an existing RebarShape family definition that
+loosely resembles the given curves (same segment count/pattern) INSTEAD
+OF building a bespoke shape sized to match them - and it was matching
+onto the wrong one every time. Fixed by passing `useExistingShapeIfPossible
+= False` - verified live immediately after: built length matched
+expected exactly (49.7405 ft), and a full real run on that same 25-
+position bar produced 25 correct, distinct, verified-matching single
+bars with 0 new warnings. The v1.0.2 safety nets (#1-3 above) are kept
+as defense-in-depth - they are what caught this live, before any wrong
+bar could be left in NBT's model - but the actual fix is this one
+argument.
+
 Keep this file free of WPF/System.Windows imports (pyNBT DQT-pattern:
 logic functions separate from the UI class).
 """
@@ -301,7 +346,10 @@ MULTIPLANAR_LEN_TOL_FT = 0.0033  # ~1mm - agreement tolerance, see check below
 def _shape_is_reliably_planar(rebar_ref, bar_position):
     """Cross-check Revit's own "planar-only" curve extraction against its
     "all multiplanar curves" extraction for the SAME bar position, before
-    trusting either one.
+    trusting either one. Returns (is_reliable, all_curves_total_length) -
+    the length is returned even on failure (0.0 if it could not be
+    computed) so the caller can reuse it as the "expected length" for the
+    post-build verification in _build_single_bar.
 
     Why this exists (see v1.0.1 note in this module's docstring): for a
     genuinely non-planar/warped bar (e.g. Free Form Rebar following a
@@ -312,7 +360,12 @@ def _shape_is_reliably_planar(rebar_ref, bar_position):
     total length between the two extraction modes is a reliable proxy:
     when Revit did not need to discard/flatten anything, both modes agree;
     when it did, they disagree (different curve count and/or a
-    wrong/inflated total length)."""
+    wrong/inflated total length).
+
+    v1.0.2: also compares curve length pair-by-pair (in extraction order),
+    not just the two grand totals - two genuinely different curve sets
+    could coincidentally sum to the same total length, which the v1.0.1
+    total-only comparison would have missed."""
     try:
         all_curves = list(rebar_ref.GetCenterlineCurves(
             True, False, False, MultiplanarOption.IncludeAllMultiplanarCurves, bar_position
@@ -321,14 +374,33 @@ def _shape_is_reliably_planar(rebar_ref, bar_position):
             True, False, False, MultiplanarOption.IncludeOnlyPlanarCurves, bar_position
         ))
     except Exception:
-        return False
+        return False, 0.0
     if not all_curves or not planar_curves:
-        return False
-    if len(all_curves) != len(planar_curves):
-        return False
+        return False, 0.0
     all_len = sum(c.Length for c in all_curves)
+    if len(all_curves) != len(planar_curves):
+        return False, all_len
     planar_len = sum(c.Length for c in planar_curves)
-    return abs(all_len - planar_len) <= MULTIPLANAR_LEN_TOL_FT
+    if abs(all_len - planar_len) > MULTIPLANAR_LEN_TOL_FT:
+        return False, all_len
+    for ac, pc in zip(all_curves, planar_curves):
+        if abs(ac.Length - pc.Length) > MULTIPLANAR_LEN_TOL_FT:
+            return False, all_len
+    return True, all_len
+
+
+def _bar_start_point(rebar_obj):
+    """Real-world start point of a (single-position) Rebar, used only for
+    the v1.0.2 duplicate-shape safety net in convert_rebar_to_singles."""
+    try:
+        curves = list(rebar_obj.GetCenterlineCurves(
+            True, False, False, MultiplanarOption.IncludeAllMultiplanarCurves, 0
+        ))
+        if curves:
+            return curves[0].GetEndPoint(0)
+    except Exception:
+        pass
+    return None
 
 
 def _build_single_bar(doc, style, bar_type, host, rebar_ref, bar_position):
@@ -337,7 +409,8 @@ def _build_single_bar(doc, style, bar_type, host, rebar_ref, bar_position):
     up). Hooks are kept baked into the curve chain (suppressHooks=False) so
     the new bar's shape/length is guaranteed identical to the original -
     see the trade-off note in this module's docstring."""
-    if not _shape_is_reliably_planar(rebar_ref, bar_position):
+    reliable, expected_len = _shape_is_reliably_planar(rebar_ref, bar_position)
+    if not reliable:
         raise ValueError(
             "Shape follows a curved/warped host surface (genuinely "
             "multiplanar) - Revit cannot represent it as a flat standard "
@@ -362,11 +435,45 @@ def _build_single_bar(doc, style, bar_type, host, rebar_ref, bar_position):
             "Rebar cannot represent this shape."
         )
 
-    return Rebar.CreateFromCurves(
+    new_bar = Rebar.CreateFromCurves(
         doc, style, bar_type, None, None, host, normal, chain,
         RebarHookOrientation.Left, RebarHookOrientation.Left,
-        True, True,
+        False, True,
+        # useExistingShapeIfPossible=False (v1.0.3 fix - see docstring):
+        # True let Revit snap onto an existing, WRONG RebarShape family
+        # definition instead of building a bespoke shape from `chain`.
+        # createNewShape=True is unchanged.
     )
+
+    # v1.0.2: end-to-end verification. Everything above is a PRE-check on
+    # the original's geometry; this instead measures what Revit actually
+    # built and compares it to the original bar position's true length
+    # (from IncludeAllMultiplanarCurves - reliable even for a genuinely
+    # warped bar, since it never flattens). If they disagree, the new bar
+    # does not really match the original, whatever the pre-checks said -
+    # delete it immediately and fail loudly rather than leave a silently
+    # wrong shape in the model.
+    try:
+        built_curves = list(new_bar.GetCenterlineCurves(
+            True, False, False, MultiplanarOption.IncludeAllMultiplanarCurves, 0
+        ))
+        built_len = sum(c.Length for c in built_curves) if built_curves else None
+    except Exception:
+        built_len = None
+
+    if built_len is None or abs(built_len - expected_len) > MULTIPLANAR_LEN_TOL_FT:
+        try:
+            doc.Delete(new_bar.Id)
+        except Exception:
+            pass
+        got_str = "N/A" if built_len is None else "{0:.4f} ft".format(built_len)
+        raise ValueError(
+            "Built bar length does not match the original bar's true shape "
+            "(expected {0:.4f} ft, got {1}) - rolled back instead of "
+            "leaving a wrong shape in the model.".format(expected_len, got_str)
+        )
+
+    return new_bar
 
 
 def convert_rebar_to_singles(doc, rebar):
@@ -419,6 +526,40 @@ def convert_rebar_to_singles(doc, rebar):
             "new_count": 0,
             "message": "No bar position produced valid geometry.",
         }
+
+    # v1.0.2: duplicate-shape safety net. Every bar position is, by
+    # definition, a physically distinct bar - two positions can share the
+    # same shape (identical stirrups, say) but never the same real-world
+    # START POINT. If any two of the bars just built DO start at the same
+    # point, that is a hard proof Revit's curve extraction returned the
+    # same (wrong) geometry more than once - exactly the symptom from the
+    # very first incident (25 positions, all identical). Refuse to finish
+    # this conversion at all rather than risk leaving duplicated/wrong
+    # bars in the model.
+    if len(new_rebars) > 1:
+        starts = [_bar_start_point(rb) for rb in new_rebars]
+        for i in range(len(starts)):
+            if starts[i] is None:
+                continue
+            for j in range(i + 1, len(starts)):
+                if starts[j] is None:
+                    continue
+                if starts[i].DistanceTo(starts[j]) < TOL:
+                    for created in new_rebars:
+                        try:
+                            doc.Delete(created.Id)
+                        except Exception:
+                            pass
+                    return {
+                        "kind": "error",
+                        "new_count": 0,
+                        "message": (
+                            "Two or more rebuilt bars started at the same "
+                            "point - Revit's geometry extraction likely "
+                            "returned the same wrong shape for multiple bar "
+                            "positions. Original left untouched."
+                        ),
+                    }
 
     try:
         doc.Delete(rebar.Id)

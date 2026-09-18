@@ -1,8 +1,8 @@
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="pyNBT - Select By Family"
-        Height="640" Width="480"
-        MinHeight="420" MinWidth="400"
+        Title="pyNBT - Select By ID"
+        Height="440" Width="420"
+        MinHeight="380" MinWidth="360"
         WindowStartupLocation="CenterScreen"
         ResizeMode="CanResizeWithGrip"
         Background="#F8F9FA"
@@ -69,8 +69,6 @@
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
@@ -83,61 +81,58 @@
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <StackPanel Grid.Column="0">
-                    <TextBlock Text="Select By Family" FontSize="16" FontWeight="Bold" Foreground="White"/>
-                    <TextBlock Text="Filter the current selection by Family" FontSize="11" Foreground="#CBD5E1" Margin="0,3,0,0"/>
+                    <TextBlock Text="Select By ID" FontSize="16" FontWeight="Bold" Foreground="White"/>
+                    <TextBlock Text="Select any element(s) in Revit by their Element ID" FontSize="11" Foreground="#CBD5E1" Margin="0,3,0,0"/>
                 </StackPanel>
                 <Border Grid.Column="1" Background="#332C3E5C" CornerRadius="12" Padding="8,3" VerticalAlignment="Center">
-                    <TextBlock Text="v1.0 - modeless" FontSize="10.5" Foreground="#E6EAF5"/>
+                    <TextBlock Text="v1.0" FontSize="10.5" Foreground="#E6EAF5"/>
                 </Border>
             </Grid>
         </Border>
 
-        <!-- Toolbar -->
-        <Border Grid.Row="1" Background="#F8F9FA" BorderBrush="{StaticResource BorderBrush1}" BorderThickness="0,0,0,1" Padding="20,12,20,10">
-            <StackPanel>
-                <Border Background="White" BorderBrush="{StaticResource BorderBrush1}" BorderThickness="1" CornerRadius="6" Padding="9,6">
-                    <TextBox x:Name="txtSearch" BorderThickness="0" Background="Transparent" FontSize="12.5"
-                             TextChanged="OnSearchChanged"/>
+        <!-- Body -->
+        <Border Grid.Row="1" Background="White" BorderBrush="{StaticResource BorderBrush1}" BorderThickness="0,0,0,1" Padding="20,16,20,16">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <TextBlock Grid.Row="0"
+                           Text="Element ID(s) - paste one or more, separated by comma, space, or new line:"
+                           FontSize="12" Foreground="{StaticResource GrayTextBrush}"
+                           TextWrapping="Wrap" Margin="0,0,0,8"/>
+
+                <Border Grid.Row="1" Background="#F8F9FA" BorderBrush="{StaticResource BorderBrush1}" BorderThickness="1" CornerRadius="6">
+                    <TextBox x:Name="txtInput" BorderThickness="0" Background="Transparent"
+                             FontSize="13" Padding="10"
+                             AcceptsReturn="True" AcceptsTab="False"
+                             TextWrapping="Wrap"
+                             VerticalScrollBarVisibility="Auto"/>
                 </Border>
-                <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
-                    <Button x:Name="btnSelectAll" Content="Select All" Click="OnSelectAll" Style="{StaticResource SecondaryBtn}"/>
-                    <Button x:Name="btnSelectNone" Content="Select None" Click="OnSelectNone" Style="{StaticResource SecondaryBtn}" Margin="8,0,0,0"/>
-                    <Button x:Name="btnRefresh" Content="Refresh" Click="OnRefresh" Style="{StaticResource SecondaryBtn}" Margin="8,0,0,0"/>
-                </StackPanel>
-            </StackPanel>
-        </Border>
 
-        <!-- List header -->
-        <Grid Grid.Row="2" Margin="20,8,20,4">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="34"/>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="64"/>
-            </Grid.ColumnDefinitions>
-            <TextBlock Grid.Column="1" Text="FAMILY" FontSize="10" Foreground="{StaticResource MutedBrush}" FontWeight="SemiBold"/>
-            <TextBlock Grid.Column="2" Text="COUNT" FontSize="10" Foreground="{StaticResource MutedBrush}" FontWeight="SemiBold" HorizontalAlignment="Right"/>
-        </Grid>
-
-        <!-- List -->
-        <Border Grid.Row="3" Background="White" BorderBrush="{StaticResource BorderBrush1}" BorderThickness="0,1,0,0" Margin="0,4,0,0">
-            <ScrollViewer VerticalScrollBarVisibility="Auto">
-                <StackPanel x:Name="panelList"/>
-            </ScrollViewer>
+                <TextBlock Grid.Row="2"
+                           Text="Works for any element with an ID (walls, families, model lines, tags, etc.) - invalid or not-found IDs are skipped and listed."
+                           FontSize="10.5" Foreground="{StaticResource MutedBrush}"
+                           TextWrapping="Wrap" Margin="0,8,0,0"/>
+            </Grid>
         </Border>
 
         <!-- Footer -->
-        <Border Grid.Row="4" Background="{StaticResource FooterBrush}" BorderBrush="{StaticResource BorderBrush1}" BorderThickness="0,1,0,0" Padding="20,12,20,16">
+        <Border Grid.Row="2" Background="{StaticResource FooterBrush}" BorderBrush="{StaticResource BorderBrush1}" BorderThickness="0,1,0,0" Padding="20,12,20,16">
             <StackPanel>
-                <TextBlock x:Name="txtStatus" Text="Ready" FontSize="12" Foreground="{StaticResource GrayTextBrush}" Margin="0,0,0,10"/>
+                <TextBlock x:Name="txtStatus" Text="Ready - paste one or more Element IDs above"
+                           FontSize="12" Foreground="{StaticResource GrayTextBrush}" Margin="0,0,0,10"/>
                 <Grid>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
-                    <Button Grid.Column="0" x:Name="btnShowInView" Content="Show in View" Click="OnShowInView" Style="{StaticResource SecondaryBtn}"/>
+                    <Button Grid.Column="0" x:Name="btnClear" Content="Clear" Click="OnClear" Style="{StaticResource SecondaryBtn}"/>
                     <Button Grid.Column="1" x:Name="btnSelect" Content="Select in Revit" Click="OnSelectInRevit" Style="{StaticResource PrimaryBtn}" Margin="8,0,0,0"/>
                 </Grid>
-                <TextBlock Text="pyNBT - Select By Family v1.0" FontSize="9.5" Foreground="{StaticResource MutedBrush}" HorizontalAlignment="Center" Margin="0,10,0,0"/>
+                <TextBlock Text="pyNBT - Select By ID v1.0" FontSize="9.5" Foreground="{StaticResource MutedBrush}" HorizontalAlignment="Center" Margin="0,10,0,0"/>
             </StackPanel>
         </Border>
     </Grid>

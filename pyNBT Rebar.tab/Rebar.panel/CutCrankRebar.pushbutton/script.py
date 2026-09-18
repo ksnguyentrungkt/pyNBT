@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """Crank Rebar (formerly "Cut & Crank Rebar" -- shortened in v1.6)
 
-Select a single straight Rebar, click a position on it (projected onto the
-original centerline) to mark **P2** -- the end of the crank/diagonal and the
-start of the lap segment -- and the tool splits the bar into 2 bars:
+Select a Rebar (v1.8: straight OR already bent, horizontal OR vertical --
+see below), click a position on it (projected onto the nearest segment) to
+mark **P2** -- the end of the crank/diagonal and the start of the lap
+segment -- and the tool splits the bar into 2 bars:
 
   Bar A: original start (keeps the ORIGINAL start hook, if any) -> straight,
          unchanged, on the original elevation, up to P1 (computed by going
@@ -22,6 +23,22 @@ v1.4 design confirmed directly with NBT (see project doc
 "cut-crank-rebar-tool.md", section "v1.3 -> v1.4" -- corrects two v1.3
 mistakes: (1) the click now marks P2, not P1; (2) Bar B runs on the
 original elevation, not the shifted one).
+
+v1.8 -- generalized beyond a single straight horizontal segment (NBT asked
+after seeing a vertical bar with an existing bend near the top, and
+confirmed via AskUserQuestion he wants the fully general case): the picked
+point can now land on any segment of an already-bent bar, and that segment
+can be horizontal OR vertical (a genuinely diagonal segment is still not
+supported). Any unchanged curves before/after the picked segment are kept
+as-is and reattached to whichever new bar ends up on their side. For a
+VERTICAL segment, NBT confirmed reusing the SAME Up/Down and Left/Right
+buttons rather than adding new ones -- their meaning swaps: Up/Down now
+picks which end (top/bottom, global Z) gets the crank, and Left/Right now
+picks which way the crank leans (screen-relative, like Up/Down did for a
+horizontal bar). See project doc "cut-crank-rebar-tool.md" and
+rebar_crank_logic.py's resolve_crank_toward_start_general /
+resolve_offset_sign_general for the full reasoning -- NOT yet tested
+against a real Revit vertical or multi-segment bar.
 
 pyNBT.tab / Rebar.panel / CutCrankRebar.pushbutton
 """
@@ -94,7 +111,7 @@ doc = __revit__.ActiveUIDocument.Document
 uidoc = __revit__.ActiveUIDocument
 
 TOOL_TITLE = "Crank Rebar"
-TOOL_VERSION = "v1.7.3"
+TOOL_VERSION = "v1.8"
 
 # ---------------------------------------------------------------------------
 # pyNBT theme (Navy + Gray/White/Black) -- see references/dqt-patterns.md
@@ -403,15 +420,22 @@ class CutCrankWindow(Window):
         self.rebar = None
         self.bar_type = None
         self.host = None
-        self.line = None
-        self.bar_dir = None
+        # v1.8 -- the bar's FULL ordered centerline curve list (may be more
+        # than one segment for an already-bent bar), replacing the old
+        # single self.line/self.bar_dir (which segment is relevant isn't
+        # known until a point is picked -- see self.seg_info below).
+        self.curves = None
         self.diameter_ft = None
 
         # State captured from Pick Point
         self.pick_point = None
-        self.dist_from_start_ft = None
-        self.dist_from_end_ft = None
-        self.total_len_ft = None
+        # v1.8 -- which segment was picked + everything about it (see
+        # logic.locate_pick_segment), replacing dist_from_start_ft /
+        # dist_from_end_ft / total_len_ft.
+        self.seg_info = None
+        # v1.8 -- 'horizontal' or 'vertical' (logic.ORIENT_*), classified
+        # from the picked segment's own direction once it's known.
+        self.orientation = None
         # v1.7 -- the active view's RightDirection at the moment of picking,
         # used to resolve the Left/Right crank-side choice (see
         # logic.resolve_crank_toward_start).
@@ -975,9 +999,8 @@ class CutCrankWindow(Window):
 
     def _reset_pick_state(self):
         self.pick_point = None
-        self.dist_from_start_ft = None
-        self.dist_from_end_ft = None
-        self.total_len_ft = None
+        self.seg_info = None
+        self.orientation = None
         self.view_right_dir = None
         self.btn_apply.IsEnabled = False
         self._clear_schematic()
@@ -1256,8 +1279,22 @@ class CutCrankWindow(Window):
         except Exception as ex:
             if "work plane" not in str(ex).lower():
                 raise
-            norm = self.bar_dir.CrossProduct(XYZ.BasisZ).Normalize()
-            origin = self.line.GetEndPoint(0)
+            # v1.8 -- which segment will end up being picked isn't known
+            # yet (that's exactly what this PickPoint call is for), so use
+            # the bar's FIRST segment as a rough stand-in just to satisfy
+            # Revit's "needs a work plane" requirement here -- it has no
+            # effect on the actual crank geometry, which is computed later
+            # from whichever segment is really picked. Crossing with world
+            # Z degenerates to zero for a near-vertical first segment, so
+            # fall back to the view's own RightDirection in that case.
+            first_seg = self.curves[0]
+            first_dir = (first_seg.GetEndPoint(1) - first_seg.GetEndPoint(0)).Normalize()
+            if abs(first_dir.Z) > 0.99:
+                partner = logic.get_view_right_direction(doc.ActiveView) or XYZ.BasisX
+            else:
+                partner = XYZ.BasisZ
+            norm = first_dir.CrossProduct(partner).Normalize()
+            origin = first_seg.GetEndPoint(0)
             t = Transaction(doc, "pyNBT - Set work plane for pick")
             t.Start()
             try:
@@ -1270,10 +1307,16 @@ class CutCrankWindow(Window):
             return uidoc.Selection.PickPoint(ObjectSnapTypes.Nearest, prompt)
 
     def _load_bar(self, el):
-        """Validate `el` and, if OK, populate self.rebar/bar_type/host/line/
-        bar_dir/diameter_ft and the SELECTED BAR info text. Returns True on
+        """Validate `el` and, if OK, populate self.rebar/bar_type/host/
+        curves/diameter_ft and the SELECTED BAR info text. Returns True on
         success, False on failure (bar info / status already updated to
-        explain why)."""
+        explain why).
+
+        v1.8 -- no longer rejects a bent (multi-segment) or vertical bar
+        here: which segment is relevant, and whether it's horizontal or
+        vertical, isn't known until the user picks a point on it (see
+        _do_select_and_pick_inner -> logic.locate_pick_segment /
+        classify_segment_orientation)."""
         self.rebar = None
         try:
             if not isinstance(el, Rebar):
@@ -1281,19 +1324,12 @@ class CutCrankWindow(Window):
                     "The selected element is not a Rebar. Select a rebar bar."
                 )
 
-            line = logic.get_single_centerline(el)
-            start = line.GetEndPoint(0)
-            end = line.GetEndPoint(1)
-            vec = end - start
-            length_ft = vec.GetLength()
+            curves = logic.get_bar_curves(el)
+            length_ft = sum(
+                c.GetEndPoint(0).DistanceTo(c.GetEndPoint(1)) for c in curves
+            )
             if length_ft < logic.mm_to_ft(10.0):
                 raise ValueError("The bar is too short to cut/crank.")
-            direction = vec.Normalize()
-            if abs(direction.Z) > 0.01:
-                raise ValueError(
-                    "This tool only supports horizontal bars in v1 "
-                    "(sloped or vertical bars are not supported yet)."
-                )
 
             bar_type = logic.get_bar_type(el, doc)
             diameter_ft = logic.get_diameter_ft(el, doc)
@@ -1311,16 +1347,19 @@ class CutCrankWindow(Window):
             self.rebar = el
             self.bar_type = bar_type
             self.host = host
-            self.line = line
-            self.bar_dir = direction
+            self.curves = curves
             self.diameter_ft = diameter_ft
 
             d_mm = logic.ft_to_mm(diameter_ft)
             len_mm = logic.ft_to_mm(length_ft)
             type_name = logic.get_element_name(bar_type)
+            seg_note = (
+                "\nSegments: {} (already bent)".format(len(curves))
+                if len(curves) > 1 else ""
+            )
             self._set_bar_info_text(
-                "Type: {}\nDiameter: {:.0f} mm\nLength: {:.0f} mm".format(
-                    type_name, d_mm, len_mm
+                "Type: {}\nDiameter: {:.0f} mm\nLength: {:.0f} mm{}".format(
+                    type_name, d_mm, len_mm, seg_note
                 )
             )
             return True
@@ -1387,17 +1426,20 @@ class CutCrankWindow(Window):
             return
 
         try:
-            pt_on_line, dist_start_ft, dist_end_ft, total_ft = (
-                logic.project_point_on_line(self.line, raw_pt)
-            )
+            seg_info = logic.locate_pick_segment(self.curves, raw_pt)
         except ValueError as ve:
             self._set_status(str(ve), CLR_ERROR)
             return
 
-        self.pick_point = pt_on_line
-        self.dist_from_start_ft = dist_start_ft
-        self.dist_from_end_ft = dist_end_ft
-        self.total_len_ft = total_ft
+        try:
+            orientation = logic.classify_segment_orientation(seg_info["seg_dir"])
+        except ValueError as ve:
+            self._set_status(str(ve), CLR_ERROR)
+            return
+
+        self.seg_info = seg_info
+        self.orientation = orientation
+        self.pick_point = seg_info["pt_on_seg"]
         # v1.7 -- capture the CURRENT view's screen-right direction now, at
         # the moment of picking, so Left/Right always matches what NBT saw
         # on screen when he clicked (not whatever view happens to be active
@@ -1405,23 +1447,54 @@ class CutCrankWindow(Window):
         self.view_right_dir = logic.get_view_right_direction(doc.ActiveView)
         self._refresh_preview()
 
-    def _resolve_crank_reference(self, crank_side):
-        """v1.7 -- returns (toward_start, ref_start_pt, ref_bar_dir,
-        ref_dist_to_click_ft) for `crank_side` ('left'/'right'), resolved
-        against self.view_right_dir (captured at pick time). See
-        logic.resolve_crank_toward_start's docstring for the reasoning.
-        Raises ValueError (safe to show directly to NBT) if Left/Right can't
-        be resolved in the view the point was picked from."""
-        toward_start = logic.resolve_crank_toward_start(
-            crank_side, self.bar_dir, self.view_right_dir
+    def _resolve_crank_reference(self, up, crank_side):
+        """v1.8 -- generalized for both orientations (v1.7 only handled
+        Left/Right on a horizontal bar). `up`/`crank_side` are the raw
+        Up/Down and Left/Right button states; which one actually decides
+        "which end gets the crank" vs "which way the offset leans" depends
+        on self.orientation -- see logic.resolve_crank_toward_start_general
+        / resolve_offset_sign_general's docstrings (NBT confirmed reusing
+        the same 2 button pairs for vertical bars via AskUserQuestion,
+        rather than adding new ones).
+
+        Returns a dict: toward_start, offset_positive, ref_start_pt,
+        ref_dir, ref_dist_to_click_ft, dist_click_to_far_ft, bar_a_prefix,
+        bar_b_suffix (the last two: unchanged existing curves to attach,
+        already correctly ordered/oriented -- empty for a single-segment
+        bar). Raises ValueError (safe to show directly to NBT) if Left/Right
+        can't be resolved in the view the point was picked from (horizontal
+        bars only)."""
+        seg = self.seg_info
+        toward_start = logic.resolve_crank_toward_start_general(
+            self.orientation, crank_side, up, seg["seg_dir"], self.view_right_dir
+        )
+        offset_positive = logic.resolve_offset_sign_general(
+            self.orientation, crank_side, up
         )
         if toward_start:
-            return (
-                True, self.line.GetEndPoint(0), self.bar_dir,
-                self.dist_from_start_ft,
-            )
-        neg_dir = XYZ(-self.bar_dir.X, -self.bar_dir.Y, -self.bar_dir.Z)
-        return (False, self.line.GetEndPoint(1), neg_dir, self.dist_from_end_ft)
+            ref_start_pt = seg["seg_start"]
+            ref_dir = seg["seg_dir"]
+            ref_dist_to_click_ft = seg["dist_seg_start_ft"]
+            dist_click_to_far_ft = seg["dist_seg_end_ft"]
+            bar_a_prefix = seg["curves_before"]
+            bar_b_suffix = seg["curves_after"]
+        else:
+            ref_start_pt = seg["seg_end"]
+            ref_dir = XYZ(-seg["seg_dir"].X, -seg["seg_dir"].Y, -seg["seg_dir"].Z)
+            ref_dist_to_click_ft = seg["dist_seg_end_ft"]
+            dist_click_to_far_ft = seg["dist_seg_start_ft"]
+            bar_a_prefix = logic.reverse_curve_list(seg["curves_after"])
+            bar_b_suffix = logic.reverse_curve_list(seg["curves_before"])
+        return {
+            "toward_start": toward_start,
+            "offset_positive": offset_positive,
+            "ref_start_pt": ref_start_pt,
+            "ref_dir": ref_dir,
+            "ref_dist_to_click_ft": ref_dist_to_click_ft,
+            "dist_click_to_far_ft": dist_click_to_far_ft,
+            "bar_a_prefix": bar_a_prefix,
+            "bar_b_suffix": bar_b_suffix,
+        }
 
     def _refresh_preview(self):
         if self.pick_point is None:
@@ -1446,14 +1519,28 @@ class CutCrankWindow(Window):
         up = bool(self.rb_up.IsChecked)
         crank_side = logic.CRANK_SIDE_LEFT if bool(self.rb_crank_left.IsChecked) else logic.CRANK_SIDE_RIGHT
         try:
-            toward_start, ref_start_pt, ref_bar_dir, ref_dist_ft = (
-                self._resolve_crank_reference(crank_side)
+            ref = self._resolve_crank_reference(up, crank_side)
+            seg = self.seg_info
+            fallback_dir = (
+                XYZ.BasisZ if self.orientation == logic.ORIENT_HORIZONTAL
+                else self.view_right_dir
             )
+            if fallback_dir is None:
+                raise ValueError(
+                    "Could not determine screen left/right in this view. "
+                    "Pick the point again from a Plan, Section, or "
+                    "Elevation view."
+                )
+            norm = logic.derive_plane_norm(
+                seg["seg_dir"], seg["curves_before"], seg["curves_after"],
+                fallback_dir,
+            )
+            offset_dir = logic.derive_offset_dir(norm, seg["seg_dir"])
             bend_dia_ft = logic.get_standard_bend_diameter_ft(self.bar_type)
             geo = logic.compute_full_geometry(
-                ref_start_pt, self.pick_point, ref_bar_dir,
-                self.diameter_ft, horiz_ft, lap_ft, up,
-                ref_dist_ft, self.total_len_ft,
+                ref["ref_start_pt"], self.pick_point, ref["ref_dir"], offset_dir,
+                self.diameter_ft, horiz_ft, lap_ft, ref["offset_positive"],
+                ref["ref_dist_to_click_ft"], ref["dist_click_to_far_ft"],
                 bend_diameter_ft=bend_dia_ft,
             )
         except ValueError as ve:
@@ -1461,14 +1548,15 @@ class CutCrankWindow(Window):
             self._clear_schematic(str(ve), CLR_ERROR)
             return
 
+        toward_start = ref["toward_start"]
         d_mm = logic.ft_to_mm(self.diameter_ft)
-        p2_from_start_mm = logic.ft_to_mm(self.dist_from_start_ft)
+        p2_from_start_mm = logic.ft_to_mm(self.seg_info["dist_true_start_ft"])
         horiz_mm = logic.ft_to_mm(geo["horiz_ft"])
         diag_mm = logic.ft_to_mm(geo["diagonal_len_ft"])
         bar_a_straight_mm = logic.ft_to_mm(geo["straight_a_len_ft"])
         bar_b_len_mm = logic.ft_to_mm(geo["b_len_ft"])
         lap_mm = logic.ft_to_mm(geo["lap_len_ft"])
-        total_mm = logic.ft_to_mm(self.total_len_ft)
+        total_mm = logic.ft_to_mm(self.seg_info["total_len_ft"])
 
         lap_source = (
             "{:g} x D, rounded up to nearest 10mm".format(lap_val)
@@ -1501,26 +1589,44 @@ class CutCrankWindow(Window):
             p3_mm = p2_mm - lap_mm
             p4_mm = p2b_mm - bar_b_len_mm
             anchor_labels = ("End", "Start")
-        screen_left_is_start = logic.start_is_screen_left(
-            self.bar_dir, self.view_right_dir
-        )
+        # v1.8 -- the schematic's own screen-left/right concept only means
+        # anything for a HORIZONTAL bar (its axial direction lies in the
+        # view's screen plane); a vertical bar's axial direction doesn't
+        # map onto "screen left/right" at all, so the abstract diagram just
+        # always keeps the true Start on the left for those.
+        if self.orientation == logic.ORIENT_HORIZONTAL:
+            screen_left_is_start = logic.start_is_screen_left(
+                seg["seg_dir"], self.view_right_dir
+            )
+        else:
+            screen_left_is_start = True
+        # v1.8 -- the little diagram's up/down bump always represents
+        # whichever axis actually controls the 1xD offset's SIGN (Up/Down
+        # for a horizontal bar, Left/Right for a vertical one -- see
+        # resolve_offset_sign_general), not literally rb_up any more.
         self._draw_schematic(
-            bar_a_anchor_mm, p1_mm, p2_mm, p3_mm, p2b_mm, p4_mm, total_mm, up,
+            bar_a_anchor_mm, p1_mm, p2_mm, p3_mm, p2b_mm, p4_mm, total_mm,
+            ref["offset_positive"],
             anchor_labels[0], anchor_labels[1],
             screen_left_is_start=screen_left_is_start,
         )
 
+        orientation_note = (
+            "\n(Vertical bar: Up/Down = which end, Left/Right = lean side)"
+            if self.orientation == logic.ORIENT_VERTICAL else ""
+        )
         summary = (
             "Bar A: {:.0f}mm straight + crank ({}, {:.0f}mm horiz) + "
             "{:.0f}mm lap ({})\n"
             "Bar B: {:.0f}mm straight, offset 1xD ({:.0f}mm) from Bar A's "
-            "lap -- Direction: {}, Side: {}"
+            "lap -- Direction: {}, Side: {}{}"
         ).format(
             bar_a_straight_mm, crank_source, horiz_mm,
             lap_mm, lap_source,
             bar_b_len_mm, d_mm,
             "Up" if up else "Down",
             "Left" if crank_side == logic.CRANK_SIDE_LEFT else "Right",
+            orientation_note,
         )
         self.tb_preview_summary.Text = summary
         self.tb_preview_summary.Foreground = _brush(CLR_TEXT)
@@ -1545,13 +1651,28 @@ class CutCrankWindow(Window):
             horiz_ft = logic.compute_crank_horiz_ft(crank_mode, crank_val, self.diameter_ft)
             up = bool(self.rb_up.IsChecked)
             crank_side = logic.CRANK_SIDE_LEFT if bool(self.rb_crank_left.IsChecked) else logic.CRANK_SIDE_RIGHT
-            toward_start, ref_start_pt, ref_bar_dir, ref_dist_ft = (
-                self._resolve_crank_reference(crank_side)
+            ref = self._resolve_crank_reference(up, crank_side)
+            seg = self.seg_info
+            fallback_dir = (
+                XYZ.BasisZ if self.orientation == logic.ORIENT_HORIZONTAL
+                else self.view_right_dir
             )
+            if fallback_dir is None:
+                raise ValueError(
+                    "Could not determine screen left/right in this view. "
+                    "Pick the point again from a Plan, Section, or "
+                    "Elevation view."
+                )
+            norm = logic.derive_plane_norm(
+                seg["seg_dir"], seg["curves_before"], seg["curves_after"],
+                fallback_dir,
+            )
+            offset_dir = logic.derive_offset_dir(norm, seg["seg_dir"])
             bend_dia_ft = logic.get_standard_bend_diameter_ft(self.bar_type)
             geo = logic.compute_full_geometry(
-                ref_start_pt, self.pick_point, ref_bar_dir, self.diameter_ft,
-                horiz_ft, lap_ft, up, ref_dist_ft, self.total_len_ft,
+                ref["ref_start_pt"], self.pick_point, ref["ref_dir"], offset_dir,
+                self.diameter_ft, horiz_ft, lap_ft, ref["offset_positive"],
+                ref["ref_dist_to_click_ft"], ref["dist_click_to_far_ft"],
                 bend_diameter_ft=bend_dia_ft,
             )
         except ValueError as ve:
@@ -1560,6 +1681,9 @@ class CutCrankWindow(Window):
         except Exception as ex:
             self._set_status("Calculation error: {}".format(str(ex)), CLR_ERROR)
             return
+
+        toward_start = ref["toward_start"]
+        ref_start_pt = ref["ref_start_pt"]
 
         # v1.5 -- if a Setup is currently active, auto-save the just-applied
         # Lap/Crank values back into it (NBT: "an apply thi no se duoc luu tu
@@ -1578,27 +1702,30 @@ class CutCrankWindow(Window):
                 crank_side=crank_side, direction_up=up,
             )
 
-        norm = self.bar_dir.CrossProduct(XYZ.BasisZ).Normalize()
+        # `norm` was already derived above (logic.derive_plane_norm), from
+        # the picked segment's own direction -- v1.8 -- instead of always
+        # self.bar_dir.CrossProduct(Z), so it stays coplanar with any
+        # unchanged curves_before/curves_after being attached.
 
         rebar = self.rebar
         bar_type = self.bar_type
         host = self.host
 
         # Read the original bar's TWO hooks BEFORE deleting it (v1.3/v1.4):
-        # index 0 = the hook at line.GetEndPoint(0) (the TRUE original
-        # start), index 1 = the hook at line.GetEndPoint(1) (the TRUE
-        # original end). P1, P2, P2B and P3 (the lap/connecting interface
-        # between A and B) never get a hook -- those are new interfaces, not
-        # original bar ends.
+        # index 0 = the hook at the bar's TRUE original start, index 1 =
+        # the hook at the bar's TRUE original end. P1, P2, P2B and P3 (the
+        # lap/connecting interface between A and B) never get a hook --
+        # those are new interfaces, not original bar ends.
         hook0_type, hook0_orient = logic.get_end_hook(doc, rebar, 0)
         hook1_type, hook1_orient = logic.get_end_hook(doc, rebar, 1)
         # v1.7.3 -- see logic.flip_hook_orientation's docstring: this tool's
-        # own `norm` (computed a few lines below from self.bar_dir) isn't
-        # guaranteed to match the original bar's own plane normal, which
-        # flips the physical bend side of a preserved hook (NBT: hook set to
-        # face down came out facing up on both preserved ends). Correcting
-        # here, right after reading, so every use of hook0_orient/hook1_orient
-        # below already has the right value.
+        # own `norm` isn't guaranteed to match the original bar's own plane
+        # normal (for a single-segment bar with no adjacent existing bend
+        # to derive it from), which flips the physical bend side of a
+        # preserved hook (NBT: hook set to face down came out facing up on
+        # both preserved ends). Correcting here, right after reading, so
+        # every use of hook0_orient/hook1_orient below already has the
+        # right value.
         hook0_orient = logic.flip_hook_orientation(hook0_orient)
         hook1_orient = logic.flip_hook_orientation(hook1_orient)
 
@@ -1623,6 +1750,7 @@ class CutCrankWindow(Window):
                 ref_start_pt, geo["P1"], geo["P2"], geo["P2B"], geo["P3"], geo["P4"],
                 a_hook_type, a_hook_orient,
                 b_hook_type, b_hook_orient,
+                bar_a_prefix=ref["bar_a_prefix"], bar_b_suffix=ref["bar_b_suffix"],
             )
             if updated_presets is not None:
                 logic.save_presets(doc, self.default_preset_name, updated_presets)
@@ -1643,8 +1771,7 @@ class CutCrankWindow(Window):
             self.rebar = None
             self.bar_type = None
             self.host = None
-            self.line = None
-            self.bar_dir = None
+            self.curves = None
             self.diameter_ft = None
             self._reset_pick_state()
             self._set_bar_info_text(

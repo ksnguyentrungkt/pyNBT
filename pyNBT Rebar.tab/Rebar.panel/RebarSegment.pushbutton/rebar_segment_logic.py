@@ -39,62 +39,60 @@ Design (locked with NBT, see project doc "rebar-segment-warped-face-tool.md"):
          (b->d) respectively -- those 2 rails are themselves the host's
          real side edges, so EVERY bar (not just the first/last) needs
          cover pushed in from the side face along its own rail, in
-         addition to the top-face cover. 2 more side faces are picked for
-         this (side_face_ac, side_face_bd), on top of the 2 existing end
-         faces (side_face_ab, side_face_cd) that still only apply to the
-         first/last bar. See apply_point_offsets / build_rebar_segment_batch.
+         addition to the top-face cover. 2 more side faces were picked
+         for this at the time (superseded by v1.2.0 -- see below).
       2) Concrete cover is measured to a bar's OUTER surface, not its
          centerline -- but Rebar.CreateFromCurves places the bar's
          CENTERLINE exactly on the curve we give it. Every offset distance
          is now (the Cover value NBT enters + the selected Bar Type's own
          radius), not the raw Cover value alone. See get_bar_radius_ft.
+         (This part is unchanged by v1.2.0.)
   - v1.1.0 -- NBT asked for a 2nd LAYOUT MODE, picked per run:
-      * "rail" (the original v1.0.x behaviour, unchanged --
-        build_rebar_segment_batch): every bar spans rail 1 (A->c) to rail
-        2 (b->d), evenly distributed along the RAIL's arc length. Every
-        bar always touches both rails -- no bar is ever short -- but bars
-        are NOT evenly spaced from each other in real perpendicular
-        distance when the region tapers (fans out/in near the narrow
-        end), because the spacing is measured along the rail, not
-        perpendicular to the bars.
+      * "rail" (the original v1.0.x behaviour): every bar spans rail 1
+        (A->c) to rail 2 (b->d), evenly distributed along the RAIL's arc
+        length. Every bar always touches both rails -- no bar is ever
+        short -- but bars are NOT evenly spaced from each other in real
+        perpendicular distance when the region tapers (fans out/in near
+        the narrow end), because the spacing is measured along the rail,
+        not perpendicular to the bars.
       * "parallel" (new -- build_rebar_segment_batch_parallel): NBT picks
-        a direction (2 points anywhere on the top face). Every bar is
-        forced PARALLEL to that direction and spaced at a true
-        perpendicular distance from its neighbours (the actual
-        code-required spacing, unlike "rail" mode) -- each bar is then
-        CLIPPED wherever it would run outside the picked top face's own
-        boundary (the quad A-b-d-c), so bars near a tapering end come out
-        shorter, and a bar clipped to (near) nothing is dropped instead
-        of creating unusable stub reinforcement (see
-        `min_bar_length_ft`). Cover still comes from the top face (every
-        bar) plus whichever of the 4 side faces (side_face_ab,
-        side_face_bd, side_face_cd, side_face_ac) that bar's endpoint
-        actually landed on after clipping -- same cover PRINCIPLE as
-        "rail" mode, just resolved per-endpoint instead of per-bar-index.
-        Implemented by flattening the (assumed near-planar/ruled) quad
-        into a local 2D (u, v) basis aligned with the picked direction
-        (see build_flat_basis), clipping in that flat 2D space (cheap,
-        robust), then snapping the clipped endpoints back onto the real
-        (possibly curved) face via project_point_to_face_tolerant -- the
-        same "flatten, then re-snap onto the real surface" pattern
-        already used by build_rail_samples.
+        a direction. Every bar is forced PARALLEL to that direction and
+        spaced at a true perpendicular distance from its neighbours --
+        each bar is then CLIPPED wherever it would run outside the picked
+        top face's own boundary (the quad A-b-d-c), so bars near a
+        tapering end come out shorter, and a bar clipped to (near) nothing
+        is dropped instead of creating unusable stub reinforcement (see
+        `min_bar_length_ft`). Implemented by flattening the (assumed
+        near-planar/ruled) quad into a local 2D (u, v) basis aligned with
+        the picked direction (see build_flat_basis), clipping in that flat
+        2D space (cheap, robust), then snapping the clipped endpoints back
+        onto the real (possibly curved) face via
+        project_point_to_face_tolerant.
   - v1.1.1 -- NBT tried "parallel" mode and asked for 2 simplifications:
       1) The direction is now picked by drawing a real Revit reference
-         line (a Model Line / Detail Line, drawn with Revit's own Line
-         tool -- full snap/dimension precision) in a plan view FIRST,
-         then picking that line in Step 3 -- far more precise than
-         clicking 2 approximate points on the (possibly curved) 3D face.
-         The script.py side reads the picked element's LocationCurve
-         endpoints as dir_p1/dir_p2; this module's geometry is unchanged
-         by that (still just takes 2 XYZ points).
-      2) Only 2 side faces are picked now (not 4): `side_face_p1` /
-         `side_face_p2`, applied to EVERY bar's own 2 endpoints
-         unconditionally (see build_rebar_segment_batch_parallel). The 2
-         END faces (A-b, c-d) are dropped entirely -- NBT instead enters
-         a plain "Edge Distance" number (`edge_setback_ft`) that shrinks
-         the row range in from both ends before distributing rows, since
-         in real detailing that first/last-row setback is usually just a
-         stated number, not something that needs its own cover geometry.
+         line (a Model Line / Detail Line) in a plan view FIRST, then
+         picking that line -- far more precise than clicking 2 approximate
+         points on the (possibly curved) 3D face. This module's geometry
+         is unchanged by that (still just takes 2 XYZ points).
+      2) (Superseded by v1.2.0 below.)
+  - v1.2.0 -- NBT's FIRST real test of the v1.0.7 rail-cover fix, on a
+    real warped ramp/pier structure, came back with "0 Errors, 120
+    Warnings: Rebar is placed completely outside of its host" for EVERY
+    bar. Root cause: pushing a point's cover "inward" by picking a SIDE
+    FACE and using Face.Project to find that face's local normal is
+    fragile on a twisted/warped host -- the picked side face may not
+    extend cleanly under every point being offset, and the old fallback
+    (nudging a failed projection toward an unrelated anchor point when it
+    landed outside that face's trim boundary) could nudge the point onto
+    a wildly wrong part of the face, or of a completely different face,
+    producing a bogus normal and pushing the bar far from the host instead
+    of into it. NBT's fix, adopted for BOTH layout modes: drop side-face
+    picking ENTIRELY. "Inward" is now computed purely from the 4 corner
+    points (A, b, c, d) NBT already picked in Step 1 plus the TOP face's
+    own (already reliable) local normal -- see edge_inward_offset. No
+    Step 2 side-face pick exists any more in either mode; Rail-to-rail
+    mode needs nothing beyond Step 1, Parallel mode needs Step 1 + the
+    direction-line pick (now "Step 2").
 
 Keep this file free of WPF/System.Windows imports (pyNBT DQT-pattern:
 logic functions separate from the UI class).
@@ -441,10 +439,11 @@ def face_normal_at_point(face, point, anchor_point=None):
 def offset_from_face(face, point, distance_ft, anchor_point=None):
     """Move `point` (assumed already at/near `face`) INWARD by
     `distance_ft` -- opposite the face's outward normal at that point.
-    This is the cover offset. Returns the original point if the normal
-    can't be read (fails safe rather than raising, so 1 bad face read
-    doesn't abort the whole batch). See face_normal_at_point for
-    `anchor_point`."""
+    This is the cover offset FROM THE TOP FACE (still used by both layout
+    modes -- v1.2.0 only removed the SIDE-face version of this, see
+    edge_inward_offset). Returns the original point if the normal can't be
+    read (fails safe rather than raising, so 1 bad face read doesn't abort
+    the whole batch). See face_normal_at_point for `anchor_point`."""
     normal = face_normal_at_point(face, point, anchor_point)
     if normal is None:
         return point
@@ -455,20 +454,65 @@ def offset_from_face(face, point, distance_ft, anchor_point=None):
     )
 
 
-def apply_point_offsets(point, offsets, anchor_point=None):
-    """Offset `point` inward once per (face, distance_ft) pair in
-    `offsets`, applied in order. A pair is skipped when its face is None
-    (not every point needs every kind of cover -- e.g. a middle bar's
-    endpoint has no end-face offset, only a top-face + rail-face one).
-    `anchor_point` (a point already known to be on/near these faces --
-    normally the bar's OTHER endpoint, see build_rebar_segment_batch) is
-    passed through to the trim-boundary nudge fallback used for the exact
-    corner points A/b/c/d (see face_normal_at_point)."""
-    pt = point
-    for face, distance_ft in offsets:
-        if face is not None and distance_ft:
-            pt = offset_from_face(face, pt, distance_ft, anchor_point)
-    return pt
+def edge_inward_offset(point, edge_p0, edge_p1, top_face, distance_ft, interior_ref_point, anchor_point=None):
+    """v1.2.0 -- push `point` inward by `distance_ft` AWAY from the
+    straight edge running from `edge_p0` to `edge_p1` (one of the quad's 4
+    boundary edges: A-b, c-d, A-c or b-d), WITHOUT needing a picked side
+    face at all. Replaces the old side-face-pick + Face.Project approach,
+    which turned out to be fragile on a warped/twisted host: the picked
+    side face doesn't always extend cleanly under every point being
+    offset, and the old trim-boundary-nudge fallback could nudge a failed
+    projection onto a wildly wrong part of the face when the given anchor
+    wasn't actually near that specific face -- on NBT's first real test on
+    a warped ramp/pier structure this pushed EVERY bar completely outside
+    its host (Revit warning "Rebar is placed completely outside of its
+    host", 0 errors / 120 warnings).
+
+    The inward direction is derived purely from geometry already in hand:
+    the edge's own tangent (edge_p1 - edge_p0) crossed with the TOP face's
+    local normal at `point` (face_normal_at_point -- the one face
+    computation that HAS been reliable since v1.0.6, used for every other
+    top-face read in this module) gives a vector tangent to the surface
+    and perpendicular to the edge -- i.e. exactly the "cover into the
+    slab/wall, away from this edge" direction. That cross product can
+    point to either side of the edge, so the sign is resolved by checking
+    which side `interior_ref_point` (a point already known to lie further
+    into the quad's interior relative to THIS edge -- normally the bar's
+    other endpoint, or the far corner of the same rail) is on, and
+    flipping if needed. `anchor_point` is passed through to
+    face_normal_at_point purely for its own trim-boundary nudge fallback
+    when `point` sits exactly on the top face's boundary (e.g. `point` IS
+    one of A/b/c/d) -- pass a point already known to be on/near the TOP
+    face (the bar's other endpoint works well), never a point on some
+    other face.
+
+    Returns the original point (no offset applied) if the top face's
+    normal can't be read, or if the edge/cross-product degenerates to a
+    zero vector -- fails safe rather than raising, same convention as
+    offset_from_face."""
+    normal = face_normal_at_point(top_face, point, anchor_point)
+    if normal is None:
+        return point
+    tangent = XYZ(edge_p1.X - edge_p0.X, edge_p1.Y - edge_p0.Y, edge_p1.Z - edge_p0.Z)
+    if tangent.GetLength() < 1e-9:
+        return point
+    tangent = tangent.Normalize()
+    perp = tangent.CrossProduct(normal)
+    if perp.GetLength() < 1e-9:
+        return point
+    perp = perp.Normalize()
+    to_ref = XYZ(
+        interior_ref_point.X - point.X,
+        interior_ref_point.Y - point.Y,
+        interior_ref_point.Z - point.Z,
+    )
+    if perp.DotProduct(to_ref) < 0:
+        perp = XYZ(-perp.X, -perp.Y, -perp.Z)
+    return XYZ(
+        point.X + perp.X * distance_ft,
+        point.Y + perp.Y * distance_ft,
+        point.Z + perp.Z * distance_ft,
+    )
 
 
 def get_bar_radius_ft(bar_type):
@@ -705,11 +749,16 @@ def _from_uv(u, v, origin, u_hat, v_hat):
 
 
 def _horizontal_line_crossings_uv(v, quad_uv):
-    """u-coordinates where the horizontal line at height `v` crosses the
+    """u-coordinates (with the EDGE INDEX each one crossed -- v1.2.0,
+    brought back so the caller can look up which of the 4 quad edges
+    (0: A->b, 1: b->d, 2: d->c, 3: c->A, matching the `quad_pts` ordering
+    used by build_rebar_segment_batch_parallel) a clipped endpoint landed
+    on, for edge_inward_offset -- no side face involved any more, this is
+    pure geometry) where the horizontal line at height `v` crosses the
     polygon `quad_uv` (an ordered list of (u, v) tuples, edges wrapping
-    around), sorted ascending. For a simple (non-self-intersecting) quad
-    this is normally exactly 2 crossings; an edge running exactly along
-    the line is skipped (its 2 neighbouring edges still produce the
+    around), sorted ascending by u. For a simple (non-self-intersecting)
+    quad this is normally exactly 2 crossings; an edge running exactly
+    along the line is skipped (its 2 neighbouring edges still produce the
     crossings)."""
     crossings = []
     n = len(quad_uv)
@@ -721,14 +770,13 @@ def _horizontal_line_crossings_uv(v, quad_uv):
         if (v0 - 1e-9 <= v <= v1 + 1e-9) or (v1 - 1e-9 <= v <= v0 + 1e-9):
             t = (v - v0) / (v1 - v0)
             u = u0 + t * (u1 - u0)
-            crossings.append(u)
-    crossings.sort()
+            crossings.append((u, i))
+    crossings.sort(key=lambda item: item[0])
     return crossings
 
 
 def build_rebar_segment_batch_parallel(
     doc, top_face,
-    side_face_p1, side_face_p2,
     host_element,
     a_pt, b_pt, c_pt, d_pt,
     dir_p1, dir_p2,
@@ -738,18 +786,14 @@ def build_rebar_segment_batch_parallel(
     """Must be called inside an already-started Transaction. "Parallel"
     layout mode -- see module docstring for the full design.
 
-    v1.1.1 SIMPLIFIED this from the original v1.1.0 version, per NBT:
-    every bar's own 2 endpoints (after clipping to the top face's
-    boundary) get cover from `side_face_p1` (this bar's lower-u/"start"
-    end) / `side_face_p2` (this bar's higher-u/"end" end) UNCONDITIONALLY,
-    the SAME 2 faces for every row -- no more per-edge lookup against all
-    4 quad edges. This mirrors "rail" mode's OWN rail-cover (every bar's
-    endpoint pushed in from the side face along its own rail) and only
-    needs 2 side face picks instead of 4. The 2 END faces (A-b, c-d) are
-    no longer picked at all -- instead `edge_setback_ft` (a plain number
-    NBT enters, "Edge Distance") shrinks the row-generation range in from
-    BOTH the A-b end and the c-d end before distributing rows, replacing
-    the old face-based end cover for positioning the first/last row.
+    v1.2.0 dropped the 2 side-face picks (side_face_p1/side_face_p2) that
+    v1.1.1 used -- see edge_inward_offset for why. Every row's 2 clipped
+    endpoints now get their side cover computed directly from whichever of
+    the quad's 4 edges (A-b, b-d, d-c, c-A) they landed on after clipping
+    (tracked by `_horizontal_line_crossings_uv`'s edge index), no face
+    reference needed. `host_element` moved earlier in the signature (was
+    positioned after the 2 side-face params before) since those params no
+    longer exist.
 
     Every bar is parallel to (dir_p1 -> dir_p2), spaced at a true
     perpendicular distance (<= spacing_ft, "Maximum Spacing" convention --
@@ -765,6 +809,10 @@ def build_rebar_segment_batch_parallel(
     `skipped_short` is a count of rows dropped for being too short."""
     origin, u_hat, v_hat = build_flat_basis([a_pt, b_pt, c_pt, d_pt], dir_p1, dir_p2)
 
+    # Edge i runs quad_pts[i] -> quad_pts[(i+1) % 4]: 0 = A->b, 1 = b->d,
+    # 2 = d->c, 3 = c->A. Matches the `_horizontal_line_crossings_uv` edge
+    # index used below to look up which real-world edge a clipped
+    # endpoint's cover should come from.
     quad_pts = [a_pt, b_pt, d_pt, c_pt]
     quad_uv = [_to_uv(p, origin, u_hat, v_hat) for p in quad_pts]
 
@@ -801,7 +849,7 @@ def build_rebar_segment_batch_parallel(
         if len(crossings) < 2:
             continue
 
-        u_start, u_end = crossings[0], crossings[-1]
+        (u_start, edge_start), (u_end, edge_end) = crossings[0], crossings[-1]
 
         try:
             p_start_flat = _from_uv(u_start, v_i, origin, u_hat, v_hat)
@@ -815,13 +863,19 @@ def build_rebar_segment_batch_parallel(
                     "the picked top face."
                 )
 
-            p1 = apply_point_offsets(
-                p_start_raw, [(top_face, eff_cover_ft), (side_face_p1, eff_cover_ft)],
-                anchor_point=p_end_raw,
+            edge_start_p0, edge_start_p1 = quad_pts[edge_start], quad_pts[(edge_start + 1) % 4]
+            edge_end_p0, edge_end_p1 = quad_pts[edge_end], quad_pts[(edge_end + 1) % 4]
+
+            p1 = offset_from_face(top_face, p_start_raw, eff_cover_ft, anchor_point=p_end_raw)
+            p1 = edge_inward_offset(
+                p1, edge_start_p0, edge_start_p1, top_face, eff_cover_ft,
+                interior_ref_point=p_end_raw, anchor_point=p_end_raw,
             )
-            p2 = apply_point_offsets(
-                p_end_raw, [(top_face, eff_cover_ft), (side_face_p2, eff_cover_ft)],
-                anchor_point=p_start_raw,
+
+            p2 = offset_from_face(top_face, p_end_raw, eff_cover_ft, anchor_point=p_start_raw)
+            p2 = edge_inward_offset(
+                p2, edge_end_p0, edge_end_p1, top_face, eff_cover_ft,
+                interior_ref_point=p_start_raw, anchor_point=p_start_raw,
             )
 
             if p1.DistanceTo(p2) < min_bar_length_ft:
@@ -840,7 +894,6 @@ def build_rebar_segment_batch_parallel(
 
 def build_rebar_segment_batch(
     doc, top_face,
-    side_face_ab, side_face_cd, side_face_ac, side_face_bd,
     host_element,
     a_pt, b_pt, c_pt, d_pt,
     bar_type, spacing_ft, cover_ft,
@@ -850,14 +903,21 @@ def build_rebar_segment_batch(
     straight Rebar per layout position between (a_pt, b_pt) and (c_pt,
     d_pt), spaced along the host face's real surface distance.
 
-    Cover is applied per point as follows (v1.0.7):
+    v1.2.0 dropped the 4 side-face picks (side_face_ab/cd/ac/bd) that
+    v1.0.7 introduced -- see edge_inward_offset for why. `host_element`
+    moved earlier in the signature (was positioned after the 4 side-face
+    params before) since those params no longer exist.
+
+    Cover is applied per point as follows:
       - p1 (every bar's endpoint riding along rail 1, A->c): top face +
-        side_face_ac -- EVERY bar, because every bar's p1 sits exactly on
-        that rail edge.
+        inward-from-the-A->c-edge -- EVERY bar, because every bar's p1
+        sits exactly on that rail edge.
       - p2 (every bar's endpoint riding along rail 2, b->d): top face +
-        side_face_bd -- EVERY bar, same reason.
-      - ONLY the first bar's 2 endpoints (A, B) ALSO get side_face_ab.
-      - ONLY the last bar's 2 endpoints (C, D) ALSO get side_face_cd.
+        inward-from-the-b->d-edge -- EVERY bar, same reason.
+      - ONLY the first bar's 2 endpoints (A, B) ALSO get pushed inward
+        from the A-b edge.
+      - ONLY the last bar's 2 endpoints (C, D) ALSO get pushed inward
+        from the c-d edge.
     Every one of those offset distances is (cover_ft + the selected bar
     type's own radius) -- see get_bar_radius_ft -- since concrete cover is
     measured to the bar's outer surface, not the centerline that
@@ -882,21 +942,47 @@ def build_rebar_segment_batch(
 
     for i, (p1_raw, p2_raw) in enumerate(positions):
         try:
-            p1_offsets = [(top_face, eff_cover_ft), (side_face_ac, eff_cover_ft)]
-            p2_offsets = [(top_face, eff_cover_ft), (side_face_bd, eff_cover_ft)]
-            if i == 0:
-                p1_offsets.append((side_face_ab, eff_cover_ft))
-                p2_offsets.append((side_face_ab, eff_cover_ft))
-            elif i == last_index:
-                p1_offsets.append((side_face_cd, eff_cover_ft))
-                p2_offsets.append((side_face_cd, eff_cover_ft))
+            # Top-face cover first (unchanged since v1.0.7), then push
+            # inward away from this bar's own rail edge -- p1 rides rail 1
+            # (A->c), so it moves toward p2 (which sits further into the
+            # quad relative to that edge); p2 rides rail 2 (b->d), so it
+            # moves toward p1. anchor_point is passed through purely for
+            # face_normal_at_point's own top-face trim-boundary nudge
+            # (needed exactly at the corner points A/b/c/d).
+            p1 = offset_from_face(top_face, p1_raw, eff_cover_ft, anchor_point=p2_raw)
+            p1 = edge_inward_offset(
+                p1, a_pt, c_pt, top_face, eff_cover_ft,
+                interior_ref_point=p2_raw, anchor_point=p2_raw,
+            )
 
-            # anchor_point = this bar's OTHER endpoint -- a nearby point
-            # already on/near the face, used to nudge past a Face.Project
-            # trim-boundary failure at the exact corner points (see
-            # apply_point_offsets / face_normal_at_point).
-            p1 = apply_point_offsets(p1_raw, p1_offsets, anchor_point=p2_raw)
-            p2 = apply_point_offsets(p2_raw, p2_offsets, anchor_point=p1_raw)
+            p2 = offset_from_face(top_face, p2_raw, eff_cover_ft, anchor_point=p1_raw)
+            p2 = edge_inward_offset(
+                p2, b_pt, d_pt, top_face, eff_cover_ft,
+                interior_ref_point=p1_raw, anchor_point=p1_raw,
+            )
+
+            if i == 0:
+                # This bar's 2 endpoints (A, b) also sit on the A-b edge --
+                # push further inward away from it too. "Interior" here
+                # means further along THIS point's own rail, away from the
+                # A-b end (c_pt for p1's rail, d_pt for p2's rail).
+                p1 = edge_inward_offset(
+                    p1, a_pt, b_pt, top_face, eff_cover_ft,
+                    interior_ref_point=c_pt, anchor_point=p2_raw,
+                )
+                p2 = edge_inward_offset(
+                    p2, a_pt, b_pt, top_face, eff_cover_ft,
+                    interior_ref_point=d_pt, anchor_point=p1_raw,
+                )
+            elif i == last_index:
+                p1 = edge_inward_offset(
+                    p1, c_pt, d_pt, top_face, eff_cover_ft,
+                    interior_ref_point=a_pt, anchor_point=p2_raw,
+                )
+                p2 = edge_inward_offset(
+                    p2, c_pt, d_pt, top_face, eff_cover_ft,
+                    interior_ref_point=b_pt, anchor_point=p1_raw,
+                )
 
             norm = compute_bar_norm(top_face, p1, p2)
             rebar = create_straight_rebar(doc, bar_type, host_element, norm, p1, p2)

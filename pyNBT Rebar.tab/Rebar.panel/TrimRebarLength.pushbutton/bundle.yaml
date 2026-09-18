@@ -1,0 +1,17 @@
+title: |-
+  Trim
+  Rebar
+tooltip: |-
+  Trim Rebar to Length
+
+  Select one or more Rebar bars in Revit first, then run this tool.
+  Type the desired remaining length (measured along the whole
+  centerline, including bends) and choose which end to keep -- Top
+  or Bottom, based on the active view's on-screen orientation.
+
+  The tool cuts off the excess from the opposite end and keeps the
+  remaining shape exactly as before (same segments, same hook at
+  the kept end). The hook at the cut end, if any, is removed.
+
+  v1: single bars only (no rebar sets/arrays yet), shape must be planar.
+author: NBT
